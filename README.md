@@ -207,34 +207,54 @@ plot_adjacency_matrix(adj_matrix, class_names, title="Co-occurrence Graph")
 
 ## Citation
 
-If you find this code useful for your research, please cite the original GRAFT paper:
+[//]: # (If you find this code useful for your research, please cite the original GRAFT paper:)
 
-```bibtex
-@inproceedings{mirzaee2025graft,
-  title={GRAFT: Graph-Augmented Framework with Vision Transformers for Multi-Label Classification},
-  author={Mirzaee, Ghazaleh and Le, Ngan and Doretto, Gianfranco and Adjeroh, Donald},
-  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
-  year={2025}
-}
-```
+[//]: # ()
+[//]: # (```bibtex)
+
+[//]: # (@inproceedings{mirzaee2025graft,)
+
+[//]: # (  title={GRAFT: Graph-Augmented Framework with Vision Transformers for Multi-Label Classification},)
+
+[//]: # (  author={Mirzaee, Ghazaleh and Le, Ngan and Doretto, Gianfranco and Adjeroh, Donald},)
+
+[//]: # (  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition &#40;CVPR&#41;},)
+
+[//]: # (  year={2025})
+
+[//]: # (})
+
+[//]: # (```)
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+[//]: # (This project is licensed under the MIT License - see the LICENSE file for details.)
 
 ## Acknowledgments
 
-- The PASCAL VOC dataset team for providing the benchmark dataset
-- The authors of the Vision Transformer and Masked Autoencoder for their foundational work
+[//]: # ()
+[//]: # (- The PASCAL VOC dataset team for providing the benchmark dataset)
 
-# graft_pascal
-# graft_pascal
-# graft_pascal
-# graft_pascal
-# graft_pascal
-# graft_pascal
-# graft_pascal
-# graft_pascal
-# graft_pascal
-# graft_pascal
-# graft_pascal
+[//]: # (- The authors of the Vision Transformer and Masked Autoencoder for their foundational work)
+[//]: # ()
+[//]: # (# graft_pascal)
+
+[//]: # (# graft_pascal)
+
+[//]: # (# graft_pascal)
+
+[//]: # (# graft_pascal)
+
+[//]: # (# graft_pascal)
+
+[//]: # (# graft_pascal)
+
+[//]: # (# graft_pascal)
+
+[//]: # (# graft_pascal)
+
+[//]: # (# graft_pascal)
+
+[//]: # (# graft_pascal)
+
+[//]: # (# graft_pascal)
