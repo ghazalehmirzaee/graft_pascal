@@ -72,11 +72,13 @@ class SpatialRelationshipGraph(nn.Module):
 
         # Learnable position embedding for relative positions
         self.relative_pos_embedding = nn.Parameter(torch.randn(3, 3, 16))  # 3x3 for above/below/same, left/right/same
-        nn.init.xavier_uniform_(self.relative_pos_embedding)
+        nn.init.normal_(self.relative_pos_embedding, mean=0.0, std=0.02)
+        # nn.init.xavier_uniform_(self.relative_pos_embedding)
 
         # Learnable position embedding for overlap
         self.overlap_embedding = nn.Parameter(torch.randn(16))
-        nn.init.xavier_uniform_(self.overlap_embedding)
+        nn.init.normal_(self.overlap_embedding, mean=0.0, std=0.02)
+        # nn.init.xavier_uniform_(self.overlap_embedding)
 
         # Position projection layer
         self.pos_proj = nn.Sequential(

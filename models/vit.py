@@ -5,6 +5,7 @@ This module implements a Vision Transformer backbone with support
 for loading MAE pre-trained weights and incorporating a multi-label
 classification head.
 """
+import os
 from typing import Dict, List, Optional, Tuple, Union, Any
 import math
 
@@ -266,6 +267,7 @@ class VisionTransformer(nn.Module):
 
         print(f"Loading MAE pre-trained weights from: {checkpoint_path}")
 
+        # The MAE checkpoint may contain the state_dict directly or under a 'model' key
         if 'model' in checkpoint:
             state_dict = checkpoint['model']
         else:
@@ -277,7 +279,7 @@ class VisionTransformer(nn.Module):
         # Filter out head weights
         state_dict = {k: v for k, v in state_dict.items() if 'head' not in k}
 
-        # Load weights
+        # Load weights with non-strict option to allow mismatches
         msg = self.load_state_dict(state_dict, strict=strict)
         print(f"Loaded MAE weights with message: {msg}")
 

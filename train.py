@@ -18,7 +18,8 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 
 from data.pascal_voc import PascalVOCDataset, create_pascal_voc_dataloaders, get_class_names
@@ -129,8 +130,8 @@ def train_epoch(
     all_targets = []
     all_outputs = []
 
-    # Set epoch for the sampler to reshuffle data
-    if distributed:
+    # Set epoch for the sampler to reshuffle data - only for DistributedSampler
+    if distributed and isinstance(dataloader.sampler, DistributedSampler):
         dataloader.sampler.set_epoch(epoch)
 
     # Training loop
@@ -617,7 +618,7 @@ def train_phase(
             optimizer,
             T_0=T_0,
             T_mult=T_mult,
-            eta_min=eta_min  # Now a float
+            eta_min=eta_min
         )
     elif scheduler_name == "reduce_on_plateau":
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -639,24 +640,94 @@ def train_phase(
 
     if checkpoint_path is not None and os.path.exists(checkpoint_path):
         if logger is not None and local_rank == 0:
-            checkpoint = logger.load_checkpoint(checkpoint_path)
+            logger.logger.info(f"Loading checkpoint from {checkpoint_path}")
+
+        # Try to load the checkpoint with secure method first, then fall back to legacy method
+        try:
+            # Use torch.serialization.safe_globals if available (PyTorch 2.6+)
+            import numpy as np
+            if hasattr(torch.serialization, 'add_safe_globals'):
+                torch.serialization.add_safe_globals([np.dtype])
+                checkpoint = torch.load(checkpoint_path, map_location=device)
+            else:
+                # Fallback for older PyTorch versions
+                checkpoint = torch.load(checkpoint_path, map_location=device)
+        except Exception as e:
+            # If secure loading fails, try with weights_only=False if this is a trusted file
+            if local_rank == 0:
+                print(f"Warning: Secure loading failed with error: {str(e)}")
+                print("Attempting to load with weights_only=False (less secure but compatible)")
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+            except Exception as e2:
+                raise RuntimeError(f"Failed to load checkpoint with both secure and legacy methods. Error: {str(e2)}")
+
+        # Extract previous phase information if available
+        prev_phase = None
+        if isinstance(checkpoint, dict) and 'phase' in checkpoint:
+            prev_phase = checkpoint['phase']
+
+        # Determine if we're in a phase transition that requires special handling
+        is_phase_transition = prev_phase is not None and prev_phase != phase
+        # Special case: transitioning from a non-graph phase to a graph phase
+        graphs_enabled_now = phase_config.get("model", {}).get("graphs", {}).get("enabled", False)
+        graphs_enabled_prev = prev_phase == "phase1_backbone" or prev_phase == "phase2_finetune"
+        going_from_no_graphs_to_graphs = is_phase_transition and (not graphs_enabled_prev and graphs_enabled_now)
+
+        # Determine if it's a pre-training checkpoint or a resuming checkpoint
+        is_pretraining_ckpt = 'model_state_dict' not in checkpoint
+
+        if is_pretraining_ckpt:
+            # For pre-training checkpoints (like MAE), only load the backbone weights
+            if local_rank == 0:
+                print(f"Loading pre-trained backbone weights only (not loading optimizer)")
+
+            # Load only the backbone weights
+            if distributed:
+                model.module.backbone.load_mae_weights(checkpoint_path, strict=False)
+            else:
+                model.backbone.load_mae_weights(checkpoint_path, strict=False)
         else:
-            checkpoint = torch.load(checkpoint_path, map_location=device)
+            # For training checkpoints, load both model and optimizer states
+            if 'model_state_dict' in checkpoint:
+                # Load model weights with appropriate strict setting
+                if going_from_no_graphs_to_graphs:
+                    # When transitioning to a graph phase, use strict=False
+                    if local_rank == 0:
+                        print(f"Phase transition detected from {prev_phase} to {phase}")
+                        print("Loading checkpoint with strict=False to allow missing graph components")
 
-        # Load model weights
-        if distributed:
-            model.module.load_state_dict(checkpoint["model_state_dict"])
-        else:
-            model.load_state_dict(checkpoint["model_state_dict"])
+                    if distributed:
+                        model.module.load_state_dict(checkpoint["model_state_dict"], strict=False)
+                    else:
+                        model.load_state_dict(checkpoint["model_state_dict"], strict=False)
 
-        # Load optimizer state
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                    if local_rank == 0:
+                        print(
+                            "Successfully loaded backbone weights. Graph components will be initialized with default values.")
+                else:
+                    # For normal cases, use strict=True
+                    if distributed:
+                        model.module.load_state_dict(checkpoint["model_state_dict"])
+                    else:
+                        model.load_state_dict(checkpoint["model_state_dict"])
 
-        # Set start epoch and best metric
-        start_epoch = checkpoint["epoch"] + 1
-        if "metrics" in checkpoint and "mAP" in checkpoint["metrics"]:
-            best_metric = checkpoint["metrics"]["mAP"]
-            best_epoch = checkpoint["epoch"]
+                # Try to load optimizer state if available
+                if 'optimizer_state_dict' in checkpoint and not going_from_no_graphs_to_graphs:
+                    try:
+                        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                    except Exception as e:
+                        if local_rank == 0:
+                            print(f"Warning: Optimizer state not loaded due to mismatch. Initializing new optimizer.")
+                            print(f"Error: {str(e)}")
+
+                # Set start epoch and best metric if available and not transitioning phases
+                if 'epoch' in checkpoint and not is_phase_transition:
+                    start_epoch = checkpoint["epoch"] + 1
+
+                if "metrics" in checkpoint and "mAP" in checkpoint["metrics"] and not is_phase_transition:
+                    best_metric = checkpoint["metrics"]["mAP"]
+                    best_epoch = checkpoint["epoch"]
 
     # Training
     epochs = phase_config["training"]["epochs"]
@@ -811,14 +882,38 @@ def train_phase(
 
         if os.path.exists(best_model_path):
             if logger is not None:
-                checkpoint = logger.load_checkpoint(best_model_path)
+                try:
+                    # Try secure loading first
+                    import numpy as np
+                    if hasattr(torch.serialization, 'add_safe_globals'):
+                        torch.serialization.add_safe_globals([np.dtype])
+                        checkpoint = torch.load(best_model_path, map_location=device)
+                    else:
+                        checkpoint = torch.load(best_model_path, map_location=device)
+                except Exception as e:
+                    # Fall back to legacy loading
+                    logger.logger.warning(f"Error loading checkpoint with default settings: {e}")
+                    logger.logger.warning("Trying to load with weights_only=False (less secure but compatible)")
+                    checkpoint = torch.load(best_model_path, map_location=device, weights_only=False)
             else:
-                checkpoint = torch.load(best_model_path, map_location=device)
+                try:
+                    import numpy as np
+                    if hasattr(torch.serialization, 'add_safe_globals'):
+                        torch.serialization.add_safe_globals([np.dtype])
+                        checkpoint = torch.load(best_model_path, map_location=device)
+                    else:
+                        checkpoint = torch.load(best_model_path, map_location=device, weights_only=False)
+                except Exception:
+                    checkpoint = torch.load(best_model_path, map_location=device, weights_only=False)
 
-            if distributed:
-                model.module.load_state_dict(checkpoint.get("model_state_dict", checkpoint))
-            else:
-                model.load_state_dict(checkpoint.get("model_state_dict", checkpoint))
+            try:
+                if distributed:
+                    model.module.load_state_dict(checkpoint.get("model_state_dict", checkpoint))
+                else:
+                    model.load_state_dict(checkpoint.get("model_state_dict", checkpoint))
+            except Exception as e:
+                print(f"Error loading best model state dict: {e}")
+                print("Continuing with current model state")
 
             best_metrics = checkpoint.get("metrics", val_metrics)
         else:
@@ -855,6 +950,7 @@ def create_dataloaders(
     # Create datasets without loaders first
     from data.pascal_voc import PascalVOCDataset
     from torchvision import transforms
+    from torch.utils.data.distributed import DistributedSampler
 
     # Define transformations
     train_transform = transforms.Compose([
@@ -911,8 +1007,7 @@ def create_dataloaders(
     # Create samplers for distributed training
     if distributed:
         train_sampler = DistributedSampler(train_dataset)
-        # Note: For validation, we still want each process to evaluate on the entire set
-        # to get accurate metrics, so we don't use a distributed sampler
+        # For validation, we still use a sequential sampler
         val_sampler = None
     else:
         train_sampler = None
@@ -944,25 +1039,6 @@ def create_dataloaders(
     return train_loader, val_loader, train_dataset, val_dataset
 
 
-def setup_distributed():
-    """
-    Initialize distributed training environment.
-
-    Returns:
-        Tuple of (local_rank, world_size)
-    """
-    if 'LOCAL_RANK' in os.environ:
-        local_rank = int(os.environ['LOCAL_RANK'])
-    else:
-        local_rank = int(os.environ.get('SLURM_LOCALID', 0))
-
-    # Initialize the process group
-    dist.init_process_group(backend='nccl')
-    torch.cuda.set_device(local_rank)
-
-    return local_rank, dist.get_world_size()
-
-
 def main(args):
     """
     Main training function.
@@ -971,27 +1047,27 @@ def main(args):
         args: Command-line arguments.
     """
     # Initialize distributed training
-    local_rank = args.local_rank
-    distributed = torch.cuda.device_count() > 1
+    distributed = False
+    local_rank = 0
 
-    if distributed:
-        # Initialize process group
+    if 'LOCAL_RANK' in os.environ:
+        distributed = True
+        local_rank = int(os.environ['LOCAL_RANK'])
+
+        # Initialize the process group
         torch.distributed.init_process_group(backend='nccl')
         torch.cuda.set_device(local_rank)
         device = torch.device('cuda', local_rank)
-        world_size = torch.distributed.get_world_size()
+
         if local_rank == 0:
-            print(f"Using distributed training with {world_size} GPUs, local rank: {local_rank}")
+            print(f"Distributed training enabled with {torch.distributed.get_world_size()} GPUs")
     else:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Load config - make sure to do this AFTER initializing distributed
-    config = load_config(args.config)
-
-    # Now we can use config safely
-    if not distributed:
-        # Only override device from config if we're not in distributed mode
+        # Load config first to get the device
+        config = load_config(args.config)
         device = torch.device(config.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
+
+    # Load config
+    config = load_config(args.config)
 
     # Create output directory
     output_dir = config.get("output_dir", "./outputs")
@@ -1009,7 +1085,7 @@ def main(args):
     if local_rank == 0 and logger is not None:
         logger.logger.info(f"Using device: {device}")
         if distributed:
-            logger.logger.info(f"Distributed training enabled with {world_size} GPUs")
+            logger.logger.info(f"Distributed training enabled with {torch.distributed.get_world_size()} GPUs")
 
     # Create dataloaders with distributed support
     train_loader, val_loader, train_dataset, val_dataset = create_dataloaders(config, distributed)
@@ -1123,8 +1199,8 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default="config/default.yaml", help="Path to config file")
     parser.add_argument("--start_phase", type=str, default="phase1_backbone", help="Starting phase")
     parser.add_argument("--experiment_name", type=str, default=None, help="Custom name for the experiment in W&B")
-    # Add this line for distributed training
     parser.add_argument("--local-rank", type=int, default=0, help="Local rank for distributed training")
     args = parser.parse_args()
 
     main(args)
+

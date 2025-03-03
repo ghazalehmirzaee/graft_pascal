@@ -205,14 +205,12 @@ class AsymmetricLoss(nn.Module):
         else:  # 'none'
             return loss
 
-
 class MultiComponentLoss(nn.Module):
     """
     Multi-Component Loss for GRAFT framework.
 
     This loss combines multiple loss functions with learnable weights.
     """
-
     def __init__(
             self,
             num_classes: int,
@@ -242,8 +240,6 @@ class MultiComponentLoss(nn.Module):
         super().__init__()
         self.num_classes = num_classes
         self.class_weights = class_weights
-
-        # Add this line to fix the issue
         self.learn_weights = learn_weights
 
         # Initialize loss components
@@ -285,7 +281,7 @@ class MultiComponentLoss(nn.Module):
         asl = self.asl_loss(input, target)
 
         # Get loss weights
-        if hasattr(self, "learn_weights") and self.learn_weights:
+        if self.learn_weights:
             wbce_weight = torch.exp(self.log_wbce_weight)
             focal_weight = torch.exp(self.log_focal_weight)
             asl_weight = torch.exp(self.log_asl_weight)
@@ -300,6 +296,7 @@ class MultiComponentLoss(nn.Module):
         return total_loss
 
 
+    
 def create_loss_function(
         config: dict,
         num_classes: int,

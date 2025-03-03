@@ -8,20 +8,23 @@
 #SBATCH --time=48:00:00
 #SBATCH --mem=187G
 
-# Load required modules
-module load cuda/12.2
-module load anaconda3
+# Use direct path to CUDA instead of module load
+export PATH=/usr/local/cuda-12.2/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda-12.2/lib64:$LD_LIBRARY_PATH
 
 # Activate your conda environment
 source activate myenv
 
-# project directory
+# Project directory
 cd /NewRaidData/ghazal/pascal/graft_pascal
 
-# Run training script with torch.distributed.launch
-python -m torch.distributed.launch \
+# Run training script with torchrun
+torchrun \
     --nproc_per_node=8 \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint=localhost:0 \
     train.py \
     --config config/default.yaml \
     --start_phase phase2_finetune \
     --experiment_name "finetune_distributed"
+

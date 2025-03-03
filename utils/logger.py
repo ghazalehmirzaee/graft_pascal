@@ -221,20 +221,26 @@ class GRAFTLogger:
                 [f"{k}: {v:.4f}" if isinstance(v, (float, int)) else f"{k}: {v}" for k, v in metrics.items()])
             self.logger.info(f"{mode.capitalize()} [{step}] - {metric_str}")
 
-        # Log to W&B
-        if self.use_wandb:
+        # Log to W&B (only when self.use_wandb is True)
+        if self.use_wandb and wandb.run is not None:
             # Add mode prefix to metrics
             wandb_metrics = {f"{mode}/{k}": v for k, v in metrics.items() if isinstance(v, (float, int, np.number))}
 
-            # Add step
-            wandb_metrics["epoch"] = step
-
-            # Add phase if available
+            # Add step and phase info
             if self.current_phase is not None:
                 wandb_metrics["phase"] = self.current_phase
 
+            # Use a deterministic step counter to avoid conflicts
+            # For train mode, use epoch * batches_per_epoch + batch_idx
+            # For val/test modes, use epoch directly
+            if mode == "train":
+                wandb_step = step
+            else:
+                # For validation, use a different step range to avoid conflicts
+                wandb_step = 10000 + step
+
             # Log to W&B
-            wandb.log(wandb_metrics, step=step)
+            wandb.log(wandb_metrics, step=wandb_step)
 
         # Store metrics
         metrics_copy = metrics.copy()
@@ -246,6 +252,7 @@ class GRAFTLogger:
             self.val_metrics.append(metrics_copy)
         elif mode == "test":
             self.test_metrics = metrics_copy
+
 
     def log_hyperparameters(self, hyperparams: Dict[str, Any]):
         """
@@ -506,8 +513,21 @@ class GRAFTLogger:
         """
         self.logger.info(f"Loading checkpoint from {checkpoint_path}")
 
-        # Load checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        # Add numpy scalar to safe globals list
+        import numpy
+        from torch.serialization import add_safe_globals
+
+        # Add the numpy scalar type to the safe globals list
+        add_safe_globals([numpy._core.multiarray.scalar])
+
+        # Load checkpoint with weights_only=True (new PyTorch 2.6 default)
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        except Exception as e:
+            self.logger.warning(f"Error loading checkpoint with default settings: {e}")
+            self.logger.warning("Trying to load with weights_only=False (less secure but compatible)")
+            # If that fails, try the fallback method of weights_only=False
+            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
         return checkpoint
 

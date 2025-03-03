@@ -4,6 +4,7 @@ GRAFT: Graph-Augmented Framework with Vision Transformers for Multi-Label Classi
 This module implements the complete GRAFT framework, combining the Vision Transformer
 backbone with multiple graph components for enhanced multi-label classification.
 """
+import os
 from typing import Dict, List, Optional, Tuple, Union, Any
 
 import torch
@@ -283,6 +284,13 @@ def create_graft_model(
     pretrained = config.get("pretrained", True)
     pretrained_weights = config.get("pretrained_weights", None)
     feature_dim = config.get("feature_dim", 768)
+
+    # Add verbose logging for pre-trained weights
+    if pretrained and pretrained_weights is not None:
+        if os.path.exists(pretrained_weights):
+            print(f"Using pre-trained weights from: {pretrained_weights}")
+        else:
+            print(f"WARNING: Pre-trained weights file {pretrained_weights} not found!")
 
     # Graph configuration
     graphs_config = config.get("graphs", {})
