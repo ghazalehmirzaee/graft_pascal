@@ -243,6 +243,9 @@ class MultiComponentLoss(nn.Module):
         self.num_classes = num_classes
         self.class_weights = class_weights
 
+        # Add this line to fix the issue
+        self.learn_weights = learn_weights
+
         # Initialize loss components
         self.wbce_loss = WeightedBinaryCrossEntropyLoss(weight=class_weights, reduction='mean')
         self.focal_loss = FocalLoss(gamma=focal_gamma, weight=class_weights, reduction='mean')
@@ -264,7 +267,6 @@ class MultiComponentLoss(nn.Module):
             self.register_buffer("wbce_weight", torch.tensor(wbce_weight))
             self.register_buffer("focal_weight", torch.tensor(focal_weight))
             self.register_buffer("asl_weight", torch.tensor(asl_weight))
-            self.learn_weights = False
 
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """

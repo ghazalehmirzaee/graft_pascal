@@ -280,13 +280,19 @@ class GRAFTLogger:
         if self.use_wandb:
             wandb.run.summary["model_summary"] = model_summary
 
-    def save_checkpoint(self, model: torch.nn.Module, optimizer: torch.optim.Optimizer, epoch: int,
-                        metrics: Dict[str, Any], is_best: bool = False):
+    def save_checkpoint(
+            self,
+            model_state_dict: Dict,
+            optimizer: torch.optim.Optimizer,
+            epoch: int,
+            metrics: Dict[str, Any],
+            is_best: bool = False
+    ):
         """
         Save model checkpoint.
 
         Args:
-            model: PyTorch model.
+            model_state_dict: PyTorch model state dictionary.
             optimizer: PyTorch optimizer.
             epoch: Current epoch.
             metrics: Dictionary of metrics.
@@ -294,7 +300,7 @@ class GRAFTLogger:
         """
         # Create checkpoint
         checkpoint = {
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": model_state_dict,
             "optimizer_state_dict": optimizer.state_dict(),
             "epoch": epoch,
             "metrics": metrics,
@@ -338,6 +344,7 @@ class GRAFTLogger:
                 )
                 best_artifact.add_file(best_path, name="best_model.pth")
                 wandb.log_artifact(best_artifact)
+
 
     def log_graph_visualizations(self, graph_data: Dict[str, Any], epoch: int):
         """
