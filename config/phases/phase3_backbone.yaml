@@ -1,0 +1,52 @@
+# Configuration for Phase 3: Graph Construction
+
+description: "Graph construction without training"
+
+# Model configuration
+model:
+  backbone:
+    name: "vit_base_patch16_224"
+    pretrained: true
+    pretrained_weights: "./mae_pretrained_vit_base.pth"
+
+  # Enable graph components in this phase
+  graphs:
+    enabled: true
+
+    # Co-occurrence graph
+    co_occurrence:
+      enabled: true
+      context_types: 4
+      context_similarity_threshold: 0.5
+
+    # Spatial relationship graph
+    spatial:
+      enabled: true
+      scales: [5, 15, 25]
+      scale_weights: [0.2, 0.3, 0.5]
+      positional_adjustment: 0.2
+
+    # Visual feature graph
+    visual:
+      enabled: true
+      similarity_balance: 0.7
+      tier1_threshold: 50
+      tier2_threshold: 10
+
+    # Semantic relationship graph
+    semantic:
+      enabled: true
+      dimension_weights: [0.3, 0.4, 0.3]
+      adaptation_factor: 0.7
+
+    # Graph fusion
+    fusion:
+      initial_uncertainties: [1.0, 1.0, 1.0, 1.0]
+
+# Training configuration
+training:
+  enabled: false  # No training in this phase, just graph construction
+
+  # Setting epochs to 0 as no training is required
+  epochs: 0
+

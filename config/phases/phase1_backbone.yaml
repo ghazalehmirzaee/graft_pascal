@@ -1,0 +1,22 @@
+# Configuration for Phase 1: Backbone Initialization
+
+description: "Backbone initialization phase"
+
+# Model configuration
+model:
+  backbone:
+    name: "vit_base_patch16_224"
+    pretrained: true
+    pretrained_weights: "./mae_pretrained_vit_base.pth"
+
+  # Disable graph components in this phase
+  graphs:
+    enabled: false
+
+# Training configuration
+training:
+  enabled: false  # No training in this phase
+
+  # Setting epochs to 0 as no training is required
+  epochs: 0
+

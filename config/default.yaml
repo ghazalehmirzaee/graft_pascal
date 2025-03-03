@@ -1,0 +1,155 @@
+# Default configuration for GRAFT on PASCAL VOC
+
+# General settings
+project_name: "GRAFT-PASCAL"
+seed: 42
+device: "cuda"
+output_dir: "./outputs"
+wandb:
+  enabled: true
+  project: "graft-pascal"
+  entity: "mirzaeeghazal"
+
+# Dataset settings
+dataset:
+  name: "pascal_voc"
+  root: "/NewRaidData/ghazal/data/pascal"
+  img_size: 224
+  num_classes: 20
+
+  # Data augmentation
+  augmentation:
+    random_horizontal_flip: true
+    random_crop: true
+    color_jitter: true
+
+  # Data normalization
+  normalization:
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+
+  # Dataloader
+  batch_size: 32
+  num_workers: 8
+
+# Model settings
+model:
+  backbone:
+    name: "vit_base_patch16_224"
+    pretrained: true
+    pretrained_weights: "./mae_pretrained_vit_base.pth"
+
+  # Graph components
+  graphs:
+    enabled: true
+
+    # Co-occurrence graph
+    co_occurrence:
+      enabled: true
+      context_types: 4
+      context_similarity_threshold: 0.5
+
+    # Spatial relationship graph
+    spatial:
+      enabled: true
+      scales: [5, 15, 25]
+      scale_weights: [0.2, 0.3, 0.5]
+      positional_adjustment: 0.2
+
+    # Visual feature relationship graph
+    visual:
+      enabled: true
+      similarity_balance: 0.7
+      tier1_threshold: 50
+      tier2_threshold: 10
+
+    # Semantic relationship graph
+    semantic:
+      enabled: true
+      dimension_weights: [0.3, 0.4, 0.3]
+      adaptation_factor: 0.7
+
+    # Graph fusion
+    fusion:
+      initial_uncertainties: [1.0, 1.0, 1.0, 1.0]
+
+# Loss function
+loss:
+  wbce_weight: 1.0
+  focal_weight: 1.0
+  asl_weight: 1.0
+  focal_gamma: 2.0
+  asl_beta: 4.0
+
+# Training settings
+training:
+  epochs: 100
+  optimizer:
+    name: "adamw"
+    lr: 1e-4
+    min_lr: 1e-6
+    weight_decay: 0.05
+
+  scheduler:
+    name: "cosine_annealing_warm_restarts"
+    T_0: 5
+    T_mult: 2
+
+  early_stopping:
+    enabled: true
+    patience: 10
+    monitor: "val_mAP"
+
+  checkpointing:
+    save_best: true
+    save_frequency: 5
+
+  validation:
+    frequency: 1
+
+# Evaluation settings
+evaluation:
+  metrics: ["mAP", "F1", "precision", "recall", "hamming_loss"]
+  per_class: true
+
+# Phase-specific settings
+phases:
+  phase1_backbone:
+    description: "Backbone initialization"
+    training:
+      enabled: false
+
+  phase2_finetune:
+    description: "Fine-tune backbone (vision-only baseline)"
+    model:
+      graphs:
+        enabled: false
+    training:
+      enabled: true
+      epochs: 50
+
+  phase3_graphs:
+    description: "Graph construction without training"
+    model:
+      graphs:
+        enabled: true
+    training:
+      enabled: false
+
+  phase4_integration:
+    description: "Progressive graph integration"
+    model:
+      graphs:
+        enabled: true
+    training:
+      enabled: true
+
+  phase5_refinement:
+    description: "Model refinement with all components"
+    model:
+      graphs:
+        enabled: true
+    training:
+      enabled: true
+      epochs: 30
+

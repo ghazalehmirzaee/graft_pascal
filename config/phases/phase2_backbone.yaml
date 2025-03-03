@@ -1,0 +1,43 @@
+# Configuration for Phase 2: Fine-tune Backbone (Vision-only Baseline)
+
+description: "Fine-tune backbone (vision-only baseline)"
+
+# Model configuration
+model:
+  backbone:
+    name: "vit_base_patch16_224"
+    pretrained: true
+    pretrained_weights: "./mae_pretrained_vit_base.pth"
+
+  # Disable graph components in this phase
+  graphs:
+    enabled: false
+
+# Training configuration
+training:
+  enabled: true
+  epochs: 50
+
+  optimizer:
+    name: "adamw"
+    lr: 1e-4
+    weight_decay: 0.05
+
+  scheduler:
+    name: "cosine_annealing_warm_restarts"
+    T_0: 5
+    T_mult: 2
+
+  early_stopping:
+    enabled: true
+    patience: 10
+    monitor: "val_mAP"
+
+# Loss function configuration
+loss:
+  wbce_weight: 1.0
+  focal_weight: 1.0
+  asl_weight: 1.0
+  focal_gamma: 2.0
+  asl_beta: 4.0
+
