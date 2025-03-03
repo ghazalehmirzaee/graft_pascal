@@ -22,6 +22,9 @@ dataset:
     random_horizontal_flip: true
     random_crop: true
     color_jitter: true
+    random_affine: true
+    random_blur: true
+    use_randaugment: false
 
   # Data normalization
   normalization:
@@ -29,7 +32,7 @@ dataset:
     std: [0.229, 0.224, 0.225]
 
   # Dataloader
-  batch_size: 16
+  batch_size: 32
   num_workers: 8
 
 # Model settings
@@ -38,6 +41,8 @@ model:
     name: "vit_base_patch16_224"
     pretrained: true
     pretrained_weights: "./mae_pretrained_vit_base.pth"
+    drop_path_rate: 0.1
+    representation_size: null
 
   # Graph components
   graphs:
@@ -63,28 +68,27 @@ model:
       tier1_threshold: 50
       tier2_threshold: 10
 
-    # Semantic relationship graph
-    semantic:
-      enabled: true
-      dimension_weights: [0.3, 0.4, 0.3]
-      adaptation_factor: 0.7
-
     # Graph fusion
     fusion:
-      initial_uncertainties: [1.0, 1.0, 1.0, 1.0]
+      initial_uncertainties: [1.0, 1.0, 1.0]
 
 # Loss function
 loss:
   wbce_weight: 1.0
   focal_weight: 1.0
   asl_weight: 1.0
+  cb_weight: 1.0
   focal_gamma: 2.0
-  asl_beta: 4.0
+  focal_alpha: 0.25
+  asl_gamma_neg: 4.0
+  asl_beta: 0.0
 
 # Training settings
 training:
-#  epochs: 100
-  epochs: 1
+  epochs: 100
+  grad_accumulation_steps: 1
+  ddp_find_unused_parameters: false
+
   optimizer:
     name: "adamw"
     lr: 1e-4
@@ -92,7 +96,7 @@ training:
     weight_decay: 0.05
 
   scheduler:
-    name: "cosine_annealing_warm_restarts"
+    name: "cosine_annealing"
     T_0: 5
     T_mult: 2
 
@@ -127,8 +131,7 @@ phases:
         enabled: false
     training:
       enabled: true
-#      epochs: 50
-      epochs: 1
+      epochs: 50
 
   phase3_graphs:
     description: "Graph construction without training"
@@ -137,6 +140,7 @@ phases:
         enabled: true
     training:
       enabled: false
+      epochs: 0
 
   phase4_integration:
     description: "Progressive graph integration"
@@ -145,6 +149,10 @@ phases:
         enabled: true
     training:
       enabled: true
+      epochs: 50
+      optimizer:
+        lr: 5e-5
+        weight_decay: 0.01
 
   phase5_refinement:
     description: "Model refinement with all components"
@@ -153,6 +161,8 @@ phases:
         enabled: true
     training:
       enabled: true
-#      epochs: 30
-      epochs: 1
+      epochs: 30
+      optimizer:
+        lr: 1e-5
+        weight_decay: 0.01
 

@@ -25,7 +25,7 @@ class GraphAttentionLayer(nn.Module):
             self,
             in_features: int,
             out_features: int,
-            dropout: float = 0.1,
+            dropout: float = 0.2,
             alpha: float = 0.2,
             concat: bool = True
     ):
@@ -119,9 +119,9 @@ class ContextualGraphFusion(nn.Module):
             self,
             num_classes: int,
             feature_dim: int,
-            num_graphs: int = 4,
-            hidden_dim: int = 128,
-            dropout: float = 0.1,
+            num_graphs: int = 3,  # Reduced from 4 to 3 graphs (removed semantic)
+            hidden_dim: int = 384,  # Enhanced from 128 to better capture features
+            dropout: float = 0.2,  # Increased from 0.1 for better regularization
             initial_uncertainties: Optional[List[float]] = None
     ):
         """
@@ -170,6 +170,16 @@ class ContextualGraphFusion(nn.Module):
             nn.Linear(hidden_dim, feature_dim)
         )
 
+        # Add layer normalization for more stable training
+        self.layer_norm1 = nn.LayerNorm(hidden_dim)
+        self.layer_norm2 = nn.LayerNorm(feature_dim)
+
+        # Add graph-specific gating mechanism
+        self.gate = nn.Sequential(
+            nn.Linear(feature_dim, num_graphs),
+            nn.Softmax(dim=-1)
+        )
+
     def forward(
             self,
             x: torch.Tensor,
@@ -191,8 +201,13 @@ class ContextualGraphFusion(nn.Module):
 
         # Compute uncertainty weights
         uncertainties = torch.exp(self.log_uncertainties)
-        attention_weights = 1.0 / uncertainties
+        attention_weights = 1.0 / (uncertainties + 1e-8)  # Add epsilon for numerical stability
         attention_weights = F.softmax(attention_weights, dim=0)
+
+        # Compute content-based graph weights
+        # Average node features across the batch for efficiency
+        avg_features = torch.mean(x, dim=0)  # [num_classes, feature_dim]
+        content_gates = self.gate(avg_features)  # [num_classes, num_graphs]
 
         # Apply graph-specific attention layers
         graph_outputs = []
@@ -202,18 +217,35 @@ class ContextualGraphFusion(nn.Module):
 
             # Apply attention layer
             graph_output = attention_layer(x, batch_adj)
+
+            # Apply layer normalization for stability
+            graph_output = self.layer_norm1(graph_output)
+
             graph_outputs.append(graph_output)
 
-        # Weight and combine graph outputs
+        # Weight and combine graph outputs - node-specific combination
         fused_output = torch.zeros_like(graph_outputs[0])
+
         for i, graph_output in enumerate(graph_outputs):
-            fused_output += attention_weights[i] * graph_output
+            # Combine global attention weights with content-based gates
+            # Global weight
+            global_weight = attention_weights[i]
+
+            # Expand for broadcasting
+            node_weights = content_gates[:, i].unsqueeze(0).unsqueeze(-1).expand(batch_size, -1, self.hidden_dim)
+
+            # Apply combined weighting
+            fused_output += (0.7 * global_weight + 0.3 * node_weights) * graph_output
 
         # Apply output projection
         fused_output = self.output_proj(fused_output)
 
-        # Skip connection
-        fused_output = x + fused_output
+        # Apply layer normalization
+        fused_output = self.layer_norm2(fused_output)
+
+        # Skip connection - gated residual connection
+        gate_value = torch.sigmoid(torch.sum(fused_output * x, dim=-1, keepdim=True) / np.sqrt(self.feature_dim))
+        fused_output = gate_value * x + (1 - gate_value) * fused_output
 
         return fused_output
 
@@ -221,9 +253,9 @@ class ContextualGraphFusion(nn.Module):
 def create_graph_fusion_network(
         num_classes: int,
         feature_dim: int,
-        num_graphs: int = 4,
-        hidden_dim: int = 128,
-        dropout: float = 0.1,
+        num_graphs: int = 3,
+        hidden_dim: int = 384,
+        dropout: float = 0.2,
         initial_uncertainties: Optional[List[float]] = None
 ) -> ContextualGraphFusion:
     """

@@ -3,16 +3,14 @@ Vision Transformer (ViT) implementation for GRAFT framework.
 
 This module implements a Vision Transformer backbone with support
 for loading MAE pre-trained weights and incorporating a multi-label
-classification head.
+classification head for the PASCAL VOC dataset.
 """
-import os
-from typing import Dict, List, Optional, Tuple, Union, Any
 import math
+from typing import Dict, List, Optional, Tuple, Union, Any
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import TransformerEncoder, TransformerEncoderLayer
 import numpy as np
 
 
@@ -82,7 +80,7 @@ class VisionTransformer(nn.Module):
 
     This implementation is based on the original ViT paper with
     modifications for multi-label classification and integration
-    with the GRAFT framework.
+    with the GRAFT framework for PASCAL VOC.
     """
 
     def __init__(
@@ -98,8 +96,10 @@ class VisionTransformer(nn.Module):
             qkv_bias: bool = True,
             drop_rate: float = 0.0,
             attn_drop_rate: float = 0.0,
-            drop_path_rate: float = 0.0,
+            drop_path_rate: float = 0.1,  # Increased from 0.0 for better regularization
             norm_layer: nn.Module = nn.LayerNorm,
+            act_layer: nn.Module = nn.GELU,  # Added explicit activation
+            representation_size: Optional[int] = None,  # Added for potential distillation
             **kwargs
     ):
         """
@@ -119,6 +119,8 @@ class VisionTransformer(nn.Module):
             attn_drop_rate: Attention dropout rate.
             drop_path_rate: Stochastic depth rate.
             norm_layer: Normalization layer.
+            act_layer: Activation function.
+            representation_size: Pre-logits representation size.
         """
         super().__init__()
         self.num_classes = num_classes
@@ -127,6 +129,7 @@ class VisionTransformer(nn.Module):
         self.embed_dim = embed_dim
         self.depth = depth
         self.num_heads = num_heads
+        self.representation_size = representation_size
 
         # Patch embedding
         self.patch_embed = PatchEmbed(
@@ -155,16 +158,28 @@ class VisionTransformer(nn.Module):
                 drop=drop_rate,
                 attn_drop=attn_drop_rate,
                 drop_path=dpr[i],
-                norm_layer=norm_layer
+                norm_layer=norm_layer,
+                act_layer=act_layer
             )
             for i in range(depth)
         ])
         self.norm = norm_layer(embed_dim)
 
-        # Multi-label classification head
+        # Pre-logits representation (for potential knowledge distillation)
+        if representation_size:
+            self.pre_logits = nn.Sequential(
+                nn.Linear(embed_dim, representation_size),
+                nn.Tanh()
+            )
+        else:
+            self.pre_logits = nn.Identity()
+
+        # Multi-label classification head with improved architecture
         self.head = nn.Sequential(
             nn.Linear(embed_dim, embed_dim),
+            nn.BatchNorm1d(embed_dim),  # Added BatchNorm for better training stability
             nn.ReLU(),
+            nn.Dropout(0.2),  # Added dropout for regularization
             nn.Linear(embed_dim, num_classes)
         )
 
@@ -206,8 +221,11 @@ class VisionTransformer(nn.Module):
         elif isinstance(m, nn.LayerNorm):
             nn.init.zeros_(m.bias)
             nn.init.ones_(m.weight)
+        elif isinstance(m, nn.BatchNorm1d):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
 
-    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_features(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Extract features from input images.
 
@@ -215,7 +233,8 @@ class VisionTransformer(nn.Module):
             x: Input tensor of shape [B, C, H, W].
 
         Returns:
-            Feature tensor of shape [B, D] where D is the embedding dimension.
+            cls_token_features: CLS token features of shape [B, D]
+            all_token_features: All token features of shape [B, N+1, D]
         """
         B = x.shape[0]
 
@@ -231,13 +250,15 @@ class VisionTransformer(nn.Module):
         x = self.pos_drop(x)
 
         # Apply transformer blocks
-        x = self.blocks(x)
+        for block in self.blocks:
+            x = block(x)
+
         x = self.norm(x)
 
-        # Return [CLS] token features
-        return x[:, 0]
+        # Return [CLS] token features and all token features
+        return self.pre_logits(x[:, 0]), x
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Forward pass.
 
@@ -245,15 +266,22 @@ class VisionTransformer(nn.Module):
             x: Input tensor of shape [B, C, H, W].
 
         Returns:
-            Logits tensor of shape [B, num_classes].
+            Dictionary containing:
+                - logits: Classification logits [B, num_classes]
+                - features: CLS token features [B, D]
+                - token_features: All token features [B, N+1, D]
         """
         # Extract features
-        x = self.forward_features(x)
+        features, token_features = self.forward_features(x)
 
         # Apply classification head
-        x = self.head(x)
+        logits = self.head(features)
 
-        return x
+        return {
+            "logits": logits,
+            "features": features,
+            "token_features": token_features
+        }
 
     def load_mae_weights(self, checkpoint_path: str, strict: bool = False):
         """
@@ -267,7 +295,6 @@ class VisionTransformer(nn.Module):
 
         print(f"Loading MAE pre-trained weights from: {checkpoint_path}")
 
-        # The MAE checkpoint may contain the state_dict directly or under a 'model' key
         if 'model' in checkpoint:
             state_dict = checkpoint['model']
         else:
@@ -279,7 +306,11 @@ class VisionTransformer(nn.Module):
         # Filter out head weights
         state_dict = {k: v for k, v in state_dict.items() if 'head' not in k}
 
-        # Load weights with non-strict option to allow mismatches
+        # Filter out representation weights if present
+        if self.representation_size is None:
+            state_dict = {k: v for k, v in state_dict.items() if 'representation' not in k}
+
+        # Load weights
         msg = self.load_state_dict(state_dict, strict=strict)
         print(f"Loaded MAE weights with message: {msg}")
 
@@ -300,7 +331,8 @@ class Block(nn.Module):
             drop: float = 0.0,
             attn_drop: float = 0.0,
             drop_path: float = 0.0,
-            norm_layer: nn.Module = nn.LayerNorm
+            norm_layer: nn.Module = nn.LayerNorm,
+            act_layer: nn.Module = nn.GELU
     ):
         """
         Initialize transformer block.
@@ -314,6 +346,7 @@ class Block(nn.Module):
             attn_drop: Attention dropout rate.
             drop_path: Stochastic depth rate.
             norm_layer: Normalization layer.
+            act_layer: Activation function.
         """
         super().__init__()
         self.norm1 = norm_layer(dim)
@@ -333,7 +366,8 @@ class Block(nn.Module):
         self.mlp = MLP(
             in_features=dim,
             hidden_features=mlp_hidden_dim,
-            drop=drop
+            drop=drop,
+            act_layer=act_layer
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -432,6 +466,7 @@ class MLP(nn.Module):
             in_features: int,
             hidden_features: Optional[int] = None,
             out_features: Optional[int] = None,
+            act_layer: nn.Module = nn.GELU,
             drop: float = 0.0
     ):
         """
@@ -441,6 +476,7 @@ class MLP(nn.Module):
             in_features: Input feature dimension.
             hidden_features: Hidden feature dimension.
             out_features: Output feature dimension.
+            act_layer: Activation function.
             drop: Dropout rate.
         """
         super().__init__()
@@ -448,7 +484,7 @@ class MLP(nn.Module):
         out_features = out_features or in_features
 
         self.fc1 = nn.Linear(in_features, hidden_features)
-        self.act = nn.GELU()
+        self.act = act_layer()
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
 
@@ -520,8 +556,6 @@ def get_2d_sincos_pos_embed(embed_dim: int, grid_size: int, cls_token: bool = Fa
     Returns:
         Positional embedding of shape [grid_size*grid_size+(1 if cls_token else 0), embed_dim].
     """
-    import numpy as np
-
     grid_h = np.arange(grid_size, dtype=np.float32)
     grid_w = np.arange(grid_size, dtype=np.float32)
     grid = np.meshgrid(grid_w, grid_h)  # here w goes first
@@ -547,8 +581,6 @@ def get_2d_sincos_pos_embed_from_grid(embed_dim: int, grid: np.ndarray) -> np.nd
     Returns:
         Positional embedding of shape [H*W, embed_dim].
     """
-    import numpy as np
-
     assert embed_dim % 2 == 0
 
     # use half of dimensions to encode grid_h
@@ -570,8 +602,6 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim: int, pos: np.ndarray) -> np.nda
     Returns:
         Positional embedding of shape [H*W, embed_dim].
     """
-    import numpy as np
-
     assert embed_dim % 2 == 0
     omega = np.arange(embed_dim // 2, dtype=np.float32)
     omega /= embed_dim / 2.
@@ -670,6 +700,7 @@ def create_vit_model(
         num_classes: int = 20,
         pretrained: bool = True,
         pretrained_weights: Optional[str] = None,
+        drop_path_rate: float = 0.1,  # Added drop path rate parameter
         **kwargs
 ) -> VisionTransformer:
     """
@@ -682,11 +713,15 @@ def create_vit_model(
         num_classes: Number of output classes.
         pretrained: Whether to use pre-trained weights.
         pretrained_weights: Path to pre-trained weights.
+        drop_path_rate: Drop path rate for regularization.
 
     Returns:
         Vision Transformer model.
     """
     assert patch_size == 16, "Only patch size 16 is supported for now."
+
+    # Add drop_path_rate to kwargs
+    kwargs['drop_path_rate'] = drop_path_rate
 
     if variant == "base":
         return vit_base_patch16_224(

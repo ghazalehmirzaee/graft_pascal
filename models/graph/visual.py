@@ -27,8 +27,8 @@ class VisualFeatureGraph(nn.Module):
             num_classes: int,
             feature_dim: int,
             similarity_balance: float = 0.7,
-            tier1_threshold: int = 50,
-            tier2_threshold: int = 10
+            tier1_threshold: int = 30,
+            tier2_threshold: int = 5
     ):
         """
         Initialize Visual Feature Graph.
@@ -75,6 +75,9 @@ class VisualFeatureGraph(nn.Module):
         # Whether the graph has been built
         self.graph_built = False
 
+        # Add small value to avoid division by zero
+        self.epsilon = 1e-8
+
     def update_features(self, features: torch.Tensor, labels: torch.Tensor):
         """
         Update class-specific visual features from batch.
@@ -90,14 +93,23 @@ class VisualFeatureGraph(nn.Module):
             # Get positive classes
             pos_indices = torch.nonzero(labels[i]).squeeze(-1)
 
+            # Skip if no positive labels
+            if pos_indices.numel() == 0:
+                continue
+
+            # Handle single label case
+            if pos_indices.numel() == 1:
+                pos_indices = pos_indices.view(1)
+
             # Update co-occurrence for each pair of labels
             for idx1 in pos_indices:
                 # Increment instance count
                 self.instance_counts[idx1] += 1
 
-                # Update class feature with moving average
+                # Update class feature with exponential moving average
                 if self.instance_counts[idx1] > 1:
-                    alpha = 1.0 / self.instance_counts[idx1]
+                    # Use a smaller alpha for more stable updates (0.1 instead of 1.0/count)
+                    alpha = 0.1
                     self.class_features.data[idx1] = (1 - alpha) * self.class_features.data[idx1] + alpha * features[i]
                 else:
                     self.class_features.data[idx1] = features[i]
@@ -115,10 +127,11 @@ class VisualFeatureGraph(nn.Module):
         Build the visual feature relationship graph using a tiered approach.
         """
         if not self.graph_built:
+            # Initialize edge weights
             edge_weights = torch.zeros(self.num_classes, self.num_classes, device=self.class_features.device)
 
             # Compute visual feature similarity
-            # Normalize feature embeddings
+            # Normalize feature embeddings for cosine similarity
             norm_features = F.normalize(self.class_features, p=2, dim=1)
 
             # Compute cosine similarity
@@ -140,7 +153,7 @@ class VisualFeatureGraph(nn.Module):
 
                         if co_occur_count > self.tier1_threshold:
                             # Tier 1: Frequent co-occurrences
-                            # Directly use visual similarity with area weighting
+                            # Directly use visual similarity with feature projection
 
                             # Compute feature difference (complementary features)
                             feat_diff = self.class_features[i] - self.class_features[j]
@@ -153,10 +166,11 @@ class VisualFeatureGraph(nn.Module):
                                            (1 - self.similarity_balance) * context_sim[i, j]
 
                             # Weight by instance ratio for class balance
+                            # Add epsilon to avoid division by zero
                             instance_ratio = min(self.instance_counts[i], self.instance_counts[j]) / \
-                                             max(self.instance_counts[i], self.instance_counts[j])
+                                             (max(self.instance_counts[i], self.instance_counts[j]) + self.epsilon)
 
-                            edge_weights[i, j] = combined_sim * sim_weight * instance_ratio
+                            edge_weights[i, j] = combined_sim * sim_weight * (0.5 + 0.5 * instance_ratio)
 
                         elif co_occur_count > self.tier2_threshold:
                             # Tier 2: Moderate co-occurrences
@@ -203,17 +217,22 @@ class VisualFeatureGraph(nn.Module):
                             for k in range(self.num_classes):
                                 if k != i and k != j:
                                     if self.co_occurrence[i, k] > self.tier2_threshold:
-                                        i_neighbors.append((k, self.co_occurrence[i, k]))
+                                        i_neighbors.append((k, self.co_occurrence[i, k].item()))
                                     if self.co_occurrence[j, k] > self.tier2_threshold:
-                                        j_neighbors.append((k, self.co_occurrence[j, k]))
+                                        j_neighbors.append((k, self.co_occurrence[j, k].item()))
 
                             # Sort neighbors by co-occurrence strength
                             i_neighbors.sort(key=lambda x: x[1], reverse=True)
                             j_neighbors.sort(key=lambda x: x[1], reverse=True)
 
                             # Take top neighbors (limit to 5 for efficiency)
-                            i_top = i_neighbors[:5]
-                            j_top = j_neighbors[:5]
+                            i_top = i_neighbors[:min(5, len(i_neighbors))]
+                            j_top = j_neighbors[:min(5, len(j_neighbors))]
+
+                            # If either class has no neighbors, fall back to basic visual similarity
+                            if not i_top or not j_top:
+                                edge_weights[i, j] = 0.1 * visual_sim[i, j]
+                                continue
 
                             # Compute transitive similarity
                             trans_sim = 0.0
@@ -225,7 +244,7 @@ class VisualFeatureGraph(nn.Module):
                                     if self.co_occurrence[i_neigh, j_neigh] > 0:
                                         # Transitive connection exists
                                         # Weight by connection strengths
-                                        weight = (i_co * j_co) / self.tier1_threshold
+                                        weight = (i_co * j_co) / max(self.tier1_threshold, 1.0)
                                         sim = (visual_sim[i, i_neigh] * visual_sim[j, j_neigh] *
                                                visual_sim[i_neigh, j_neigh])
 
@@ -235,15 +254,41 @@ class VisualFeatureGraph(nn.Module):
                             if total_weight > 0:
                                 edge_weights[i, j] = trans_sim / total_weight
                             else:
-                                # Fallback to context similarity with low confidence
-                                edge_weights[i, j] = 0.1 * context_sim[i, j]
+                                # Fallback to basic visual similarity with low confidence
+                                edge_weights[i, j] = 0.05 * visual_sim[i, j]
+
+            # Apply sparsity - keep only top K connections per class
+            sparse_weights = torch.zeros_like(edge_weights)
+
+            # Determine K adaptively based on class frequency
+            avg_count = torch.mean(self.instance_counts)
+
+            for i in range(self.num_classes):
+                # Get non-diagonal weights for this class
+                class_weights = edge_weights[i, :]
+                class_weights[i] = 0  # Ignore self-connection
+
+                # Calculate K based on instance count
+                if self.instance_counts[i] > avg_count:
+                    k = 5  # More connections for common classes
+                else:
+                    k = 3  # Fewer connections for rare classes
+
+                # Keep only top-k values if we have enough non-zero values
+                if torch.sum(class_weights > 0) > k:
+                    topk_values, topk_indices = torch.topk(class_weights, k)
+                    for idx in topk_indices:
+                        sparse_weights[i, idx] = edge_weights[i, idx]
+                else:
+                    # Keep all positive connections if fewer than k
+                    sparse_weights[i, :] = class_weights * (class_weights > 0).float()
 
             # Normalize edge weights
-            max_weight = torch.max(edge_weights)
+            max_weight = torch.max(sparse_weights)
             if max_weight > 0:
-                edge_weights = edge_weights / max_weight
+                sparse_weights = sparse_weights / max_weight
 
-            self.edge_weights = edge_weights
+            self.edge_weights = sparse_weights
             self.graph_built = True
 
     def get_adjacency_matrix(self) -> torch.Tensor:
@@ -286,8 +331,8 @@ def create_visual_feature_graph(
         num_classes: int,
         feature_dim: int,
         similarity_balance: float = 0.7,
-        tier1_threshold: int = 50,
-        tier2_threshold: int = 10
+        tier1_threshold: int = 30,
+        tier2_threshold: int = 5
 ) -> VisualFeatureGraph:
     """
     Create a Visual Feature Graph module.

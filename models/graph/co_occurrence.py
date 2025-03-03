@@ -27,7 +27,7 @@ class CoOccurrenceGraph(nn.Module):
             co_occurrence_matrix: Optional[torch.Tensor] = None,
             context_types: int = 4,
             context_similarity_threshold: float = 0.5,
-            scaling_factor: float = 10.0
+            scaling_factor: float = 5.0
     ):
         """
         Initialize Co-occurrence Graph.
@@ -74,6 +74,9 @@ class CoOccurrenceGraph(nn.Module):
             max_count = torch.max(self.class_counts)
             avg_count = torch.mean(self.class_counts)
 
+            # Add small epsilon to avoid division by zero
+            epsilon = 1e-8
+
             # Normalize co-occurrence
             normalized_co_occurrence = torch.zeros_like(self.co_occurrence)
             for i in range(self.num_classes):
@@ -81,7 +84,7 @@ class CoOccurrenceGraph(nn.Module):
                     if i != j and self.class_counts[i] > 0 and self.class_counts[j] > 0:
                         # Normalized co-occurrence
                         normalized_co_occurrence[i, j] = self.co_occurrence[i, j] / torch.sqrt(
-                            self.class_counts[i] * self.class_counts[j])
+                            (self.class_counts[i] + epsilon) * (self.class_counts[j] + epsilon))
 
             # Compute context affinity
             context_affinity = torch.zeros_like(self.co_occurrence)
@@ -102,17 +105,29 @@ class CoOccurrenceGraph(nn.Module):
                         # Context affinity based on similarity in embedding space
                         context_affinity[i, j] = (context_sim[i, j] * context_aff_mask[i, j]).item()
 
-            # Class balance correction
+            # Class balance correction for PASCAL VOC
+            # This addresses the imbalance between common and rare classes
             class_balance_correction = torch.zeros_like(self.co_occurrence)
             for i in range(self.num_classes):
                 for j in range(self.num_classes):
                     if i != j:
                         # Class balance correction factor
                         # Boost relationships involving rare classes
-                        min_count = min(self.class_counts[i], self.class_counts[j])
-                        max_count = max(self.class_counts[i], self.class_counts[j])
+                        min_count = min(self.class_counts[i].item(), self.class_counts[j].item())
+                        max_count = max(self.class_counts[i].item(), self.class_counts[j].item())
 
-                        balance_factor = (max_count / avg_count) * (min_count / max_count)
+                        # Calculate balance factor to boost rare class relationships
+                        if min_count < 0.1 * avg_count:  # Very rare classes
+                            balance_factor = 1.5  # Higher boosting for very rare classes
+                        elif min_count < 0.3 * avg_count:  # Moderately rare classes
+                            balance_factor = 1.3  # Medium boosting for moderately rare classes
+                        else:  # Common classes
+                            balance_factor = 1.0  # No boosting for common classes
+
+                        # Additional adjustment based on ratio between min and max count
+                        ratio_factor = (min_count + epsilon) / (max_count + epsilon)
+                        balance_factor *= (0.5 + 0.5 * ratio_factor)  # Balance based on class ratio
+
                         class_balance_correction[i, j] = balance_factor
 
             # Apply confidence weighting
@@ -122,13 +137,38 @@ class CoOccurrenceGraph(nn.Module):
                     if i != j:
                         # Confidence based on number of co-occurrences
                         # More co-occurrences -> higher confidence
+                        # Using a sigmoid-like function for smoother scaling
                         confidence[i, j] = 1.0 - torch.exp(-self.co_occurrence[i, j] / self.scaling_factor)
 
-            # Compute final edge weights
-            self.edge_weights = normalized_co_occurrence * context_affinity * class_balance_correction * confidence
+            # Compute final edge weights with additional sparsity for PASCAL VOC
+            raw_weights = normalized_co_occurrence * context_affinity * class_balance_correction * confidence
+
+            # Apply threshold to enforce sparsity
+            # Keep only top connections for each class
+            sparse_weights = torch.zeros_like(raw_weights)
+            for i in range(self.num_classes):
+                # Get non-diagonal weights for this class
+                class_weights = raw_weights[i, :]
+                class_weights[i] = 0  # Ignore self-connection
+
+                # Keep only top connections (adaptive based on class frequency)
+                if self.class_counts[i] > avg_count:
+                    k = 5  # More connections for common classes
+                else:
+                    k = 3  # Fewer connections for rare classes
+
+                # Get top-k indices
+                if torch.sum(class_weights > 0) > k:
+                    topk_values, topk_indices = torch.topk(class_weights, k)
+                    # Set weights for top-k connections
+                    for idx in topk_indices:
+                        sparse_weights[i, idx] = raw_weights[i, idx]
+                else:
+                    # Keep all positive connections if fewer than k
+                    sparse_weights[i, :] = class_weights * (class_weights > 0).float()
 
             # Make symmetric
-            self.edge_weights = 0.5 * (self.edge_weights + self.edge_weights.t())
+            self.edge_weights = 0.5 * (sparse_weights + sparse_weights.t())
 
             # Normalize
             max_weight = torch.max(self.edge_weights)
@@ -153,6 +193,14 @@ class CoOccurrenceGraph(nn.Module):
         # Update co-occurrence matrix
         for i in range(batch_size):
             label_indices = torch.nonzero(labels[i]).squeeze(-1)
+
+            # Skip empty samples (no labels)
+            if label_indices.numel() == 0:
+                continue
+
+            # Handle case where there's only one label
+            if label_indices.numel() == 1:
+                continue
 
             # Update co-occurrence for each pair of labels
             for idx1 in label_indices:
@@ -204,7 +252,7 @@ def create_co_occurrence_graph(
         co_occurrence_matrix: Optional[torch.Tensor] = None,
         context_types: int = 4,
         context_similarity_threshold: float = 0.5,
-        scaling_factor: float = 10.0
+        scaling_factor: float = 5.0
 ) -> CoOccurrenceGraph:
     """
     Create a Co-occurrence Graph module.
