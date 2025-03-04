@@ -717,7 +717,7 @@ def train_phase(
                 verbose=True
             )
         elif scheduler_name == "cosine_annealing":
-            epochs = phase_config["training"].get("epochs", 100)
+            epochs = phase_config["training"].get("epochs", 1)
             scheduler = optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
                 T_max=epochs,

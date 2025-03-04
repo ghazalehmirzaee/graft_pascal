@@ -9,20 +9,20 @@ from typing import Dict, List, Optional, Tuple, Union, Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 
 from models.vit import create_vit_model
 from models.graph.co_occurrence import create_co_occurrence_graph
 from models.graph.spatial import create_spatial_relationship_graph
 from models.graph.visual import create_visual_feature_graph
 from models.graph.fusion import create_graph_fusion_network
+import numpy as np
 
 
 class GRAFT(nn.Module):
     """
     Graph-Augmented Framework with Vision Transformers for Multi-Label Classification.
 
-    This model combines a Vision Transformer backbone with graph components
+    This model combines a Vision Transformer backbone with multiple graph components
     to capture complex relationships between labels for improved multi-label classification.
     """
 
@@ -39,16 +39,17 @@ class GRAFT(nn.Module):
             co_occurrence_enabled: bool = True,
             spatial_enabled: bool = True,
             visual_enabled: bool = True,
+            dropout_rate: float = 0.2,
             context_types: int = 4,
             context_similarity_threshold: float = 0.5,
             scales: List[int] = [5, 15, 25],
             scale_weights: List[float] = [0.2, 0.3, 0.5],
             positional_adjustment: float = 0.2,
             similarity_balance: float = 0.7,
-            tier1_threshold: int = 50,
-            tier2_threshold: int = 10,
+            tier1_threshold: int = 30,
+            tier2_threshold: int = 8,
             initial_uncertainties: Optional[List[float]] = None,
-            use_checkpointing: bool = False
+            gradient_checkpointing: bool = False
     ):
         """
         Initialize GRAFT model.
@@ -65,6 +66,7 @@ class GRAFT(nn.Module):
             co_occurrence_enabled: Whether to enable co-occurrence graph.
             spatial_enabled: Whether to enable spatial relationship graph.
             visual_enabled: Whether to enable visual feature graph.
+            dropout_rate: Dropout rate for classification head.
             context_types: Number of context types for co-occurrence graph.
             context_similarity_threshold: Threshold for context similarity.
             scales: List of grid scales for spatial relationship graph.
@@ -74,7 +76,7 @@ class GRAFT(nn.Module):
             tier1_threshold: Threshold for Tier 1 relationships.
             tier2_threshold: Threshold for Tier 2 relationships.
             initial_uncertainties: Initial uncertainty estimates for each graph.
-            use_checkpointing: Whether to use gradient checkpointing to save memory.
+            gradient_checkpointing: Whether to use gradient checkpointing to save memory.
         """
         super().__init__()
         self.num_classes = num_classes
@@ -82,7 +84,7 @@ class GRAFT(nn.Module):
         self.img_size = img_size
         self.feature_dim = feature_dim
         self.graphs_enabled = graphs_enabled
-        self.use_checkpointing = use_checkpointing
+        self.gradient_checkpointing = gradient_checkpointing
 
         # Create Vision Transformer backbone
         self.backbone = create_vit_model(
@@ -90,15 +92,23 @@ class GRAFT(nn.Module):
             img_size=img_size,
             num_classes=num_classes,
             pretrained=pretrained,
-            pretrained_weights=pretrained_weights,
-            use_checkpointing=use_checkpointing
+            pretrained_weights=pretrained_weights
         )
+
+        # Enable gradient checkpointing to save memory if requested
+        if self.gradient_checkpointing:
+            self.backbone.blocks.gradient_checkpointing_enable()
 
         # Extract features from backbone (remove classification head)
         self.backbone_feature_dim = feature_dim  # Usually 768 for ViT-Base
 
-        # Node feature initialization - lightweight projection
-        self.node_init = nn.Linear(self.backbone_feature_dim, feature_dim)
+        # Node feature initialization with dropout for regularization
+        self.node_init = nn.Sequential(
+            nn.Linear(self.backbone_feature_dim, feature_dim),
+            nn.LayerNorm(feature_dim),
+            nn.Dropout(dropout_rate),
+            nn.ReLU()
+        )
 
         # Graph components
         if graphs_enabled:
@@ -133,27 +143,28 @@ class GRAFT(nn.Module):
                 )
                 self.enabled_graphs.append("visual")
 
-            # Prepare default uncertainties if needed
-            if initial_uncertainties is None:
-                initial_uncertainties = [1.0] * len(self.enabled_graphs)
-
-            # Ensure we have the right number of uncertainty values
-            if len(initial_uncertainties) != len(self.enabled_graphs):
-                initial_uncertainties = [1.0] * len(self.enabled_graphs)
-
             # Graph fusion network
             if len(self.enabled_graphs) > 0:
+                if initial_uncertainties is None:
+                    initial_uncertainties = [1.0] * len(self.enabled_graphs)
+
                 self.fusion_network = create_graph_fusion_network(
                     num_classes=num_classes,
                     feature_dim=feature_dim,
                     num_graphs=len(self.enabled_graphs),
                     hidden_dim=feature_dim // 2,
-                    dropout=0.1,
+                    dropout=dropout_rate,
                     initial_uncertainties=initial_uncertainties
                 )
 
-        # Classification head
-        self.classifier = nn.Linear(feature_dim, num_classes)
+        # Classification head with dropout for regularization
+        self.classifier = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim),
+            nn.LayerNorm(feature_dim),
+            nn.Dropout(dropout_rate),
+            nn.ReLU(),
+            nn.Linear(feature_dim, num_classes)
+        )
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
@@ -171,7 +182,8 @@ class GRAFT(nn.Module):
         batch_size = x.shape[0]
 
         # Extract visual features from backbone
-        backbone_features = self.backbone.forward_features(x)  # [batch_size, feature_dim]
+        with torch.set_grad_enabled(True):
+            backbone_features = self.backbone.forward_features(x)  # [batch_size, feature_dim]
 
         # Initial node features (replicated for each class)
         node_features = self.node_init(backbone_features)  # [batch_size, feature_dim]
@@ -185,14 +197,17 @@ class GRAFT(nn.Module):
 
             for graph_name in self.enabled_graphs:
                 graph = self.graph_components[graph_name]
-                # Use custom get_adjacency_matrix method if available, otherwise use the module's built-in one
                 adj_matrices.append(graph.get_adjacency_matrix())
 
             # Apply graph fusion
             node_features = self.fusion_network(node_features, adj_matrices)
 
-        # Apply classifier to get logits
-        logits = self.classifier(node_features.mean(dim=1))  # [batch_size, num_classes]
+        # Apply classifier to each node
+        node_logits = self.classifier(node_features)  # [batch_size, num_classes, num_classes]
+
+        # For multi-label classification, use the diagonal of node_logits
+        # This represents each class's prediction for itself
+        logits = torch.diagonal(node_logits, dim1=1, dim2=2)  # [batch_size, num_classes]
 
         return {
             "logits": logits,
@@ -216,9 +231,7 @@ class GRAFT(nn.Module):
 
         # Update co-occurrence graph
         if "co_occurrence" in self.graph_components and "labels" in batch_data:
-            labels = batch_data["labels"]
-            if labels is not None:
-                self.graph_components["co_occurrence"].update_statistics(labels)
+            self.graph_components["co_occurrence"].update_statistics(batch_data["labels"])
 
         # Update spatial relationship graph
         if "spatial" in self.graph_components and "boxes" in batch_data and "box_labels" in batch_data:
@@ -227,7 +240,7 @@ class GRAFT(nn.Module):
             box_labels = batch_data["box_labels"]
 
             if boxes is not None and box_labels is not None:
-                # Convert boxes to positions and sizes for spatial graph
+                # Convert boxes to positions and sizes
                 positions = []
                 sizes = []
 
@@ -236,12 +249,8 @@ class GRAFT(nn.Module):
                     positions.append([(x_min + x_max) / 2, (y_min + y_max) / 2])
                     sizes.append([x_max - x_min, y_max - y_min])
 
-                # Convert to tensors if they're not already
-                if not isinstance(positions, torch.Tensor):
-                    positions = torch.tensor(positions,
-                                             device=self.spatial.device if hasattr(self, 'spatial') else 'cpu')
-                if not isinstance(sizes, torch.Tensor):
-                    sizes = torch.tensor(sizes, device=self.spatial.device if hasattr(self, 'spatial') else 'cpu')
+                positions = torch.tensor(positions, device=boxes.device)
+                sizes = torch.tensor(sizes, device=boxes.device)
 
                 self.graph_components["spatial"].update_statistics(positions, sizes, box_labels)
 
@@ -272,11 +281,12 @@ def create_graft_model(
     """
     # Extract configuration parameters
     img_size = config.get("img_size", 224)
-    vit_variant = config.get("vit_variant", "base")
+    vit_variant = config.get("backbone", {}).get("name", "vit_base_patch16_224").split('_')[1]
     pretrained = config.get("backbone", {}).get("pretrained", True)
     pretrained_weights = config.get("backbone", {}).get("pretrained_weights", None)
     feature_dim = config.get("feature_dim", 768)
-    use_checkpointing = config.get("use_checkpointing", False)
+    dropout_rate = config.get("dropout_rate", 0.2)
+    gradient_checkpointing = config.get("gradient_checkpointing", False)
 
     # Graph configuration
     graphs_config = config.get("graphs", {})
@@ -296,8 +306,8 @@ def create_graft_model(
 
     # Visual graph parameters
     similarity_balance = graphs_config.get("visual", {}).get("similarity_balance", 0.7)
-    tier1_threshold = graphs_config.get("visual", {}).get("tier1_threshold", 50)
-    tier2_threshold = graphs_config.get("visual", {}).get("tier2_threshold", 10)
+    tier1_threshold = graphs_config.get("visual", {}).get("tier1_threshold", 30)
+    tier2_threshold = graphs_config.get("visual", {}).get("tier2_threshold", 8)
 
     # Fusion parameters
     initial_uncertainties = graphs_config.get("fusion", {}).get("initial_uncertainties", None)
@@ -311,6 +321,7 @@ def create_graft_model(
         pretrained=pretrained,
         pretrained_weights=pretrained_weights,
         feature_dim=feature_dim,
+        dropout_rate=dropout_rate,
         graphs_enabled=graphs_enabled,
         co_occurrence_enabled=co_occurrence_enabled,
         spatial_enabled=spatial_enabled,
@@ -324,7 +335,7 @@ def create_graft_model(
         tier1_threshold=tier1_threshold,
         tier2_threshold=tier2_threshold,
         initial_uncertainties=initial_uncertainties,
-        use_checkpointing=use_checkpointing
+        gradient_checkpointing=gradient_checkpointing
     )
 
     return model

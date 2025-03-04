@@ -37,6 +37,7 @@ dataset:
 
 # Model settings
 model:
+  gradient_checkpointing: true
   backbone:
     name: "vit_base_patch16_224"
     pretrained: true
@@ -85,7 +86,8 @@ loss:
 
 # Training settings
 training:
-  epochs: 100
+#  epochs: 100
+  epochs: 1
   grad_accumulation_steps: 1
   ddp_find_unused_parameters: false
 
@@ -131,7 +133,8 @@ phases:
         enabled: false
     training:
       enabled: true
-      epochs: 50
+#      epochs: 50
+      epochs: 1
 
   phase3_graphs:
     description: "Graph construction without training"
@@ -149,7 +152,8 @@ phases:
         enabled: true
     training:
       enabled: true
-      epochs: 50
+#      epochs: 50
+      epochs: 1
       optimizer:
         lr: 5e-5
         weight_decay: 0.01
@@ -161,7 +165,8 @@ phases:
         enabled: true
     training:
       enabled: true
-      epochs: 30
+#      epochs: 30
+      epochs: 1
       optimizer:
         lr: 1e-5
         weight_decay: 0.01
