@@ -1,7 +1,7 @@
 """
 Data transformation utilities for PASCAL VOC dataset.
 """
-from typing import List, Dict, Tuple, Optional, Union, Any, Callable
+from typing import List, Dict, Tuple, Optional, Union, Any
 import random
 
 import torch
@@ -28,10 +28,7 @@ class GRAFTTransform:
             std: List[float] = [0.229, 0.224, 0.225],
             random_horizontal_flip: bool = True,
             random_crop: bool = True,
-            color_jitter: bool = True,
-            random_affine: bool = True,  # Added random affine transformation
-            random_blur: bool = True,  # Added random blur
-            normalize: bool = True  # Option to control normalization
+            color_jitter: bool = True
     ):
         """
         Initialize transformations.
@@ -44,9 +41,6 @@ class GRAFTTransform:
             random_horizontal_flip: Whether to apply random horizontal flip.
             random_crop: Whether to apply random crop.
             color_jitter: Whether to apply color jitter.
-            random_affine: Whether to apply random affine transformation.
-            random_blur: Whether to apply random blur.
-            normalize: Whether to normalize the image.
         """
         self.img_size = img_size
         self.is_train = is_train
@@ -55,9 +49,6 @@ class GRAFTTransform:
         self.random_horizontal_flip = random_horizontal_flip and is_train
         self.random_crop = random_crop and is_train
         self.color_jitter = color_jitter and is_train
-        self.random_affine = random_affine and is_train
-        self.random_blur = random_blur and is_train
-        self.normalize = normalize
 
         # Define jitter parameters for training
         self.brightness = 0.2
@@ -71,16 +62,6 @@ class GRAFTTransform:
 
         # Flip probability
         self.flip_prob = 0.5
-
-        # Affine parameters
-        self.affine_prob = 0.2
-        self.degrees = 10
-        self.translate = (0.1, 0.1)
-        self.scale = (0.9, 1.1)
-
-        # Blur parameters
-        self.blur_prob = 0.1
-        self.blur_radius = 2.0
 
     def __call__(self, img: Image.Image, boxes: Optional[List[List[float]]] = None) -> Tuple[
         torch.Tensor, Optional[List[List[float]]]]:
@@ -131,7 +112,7 @@ class GRAFTTransform:
                     boxes = adjusted_boxes
 
             # Color jitter
-            if self.color_jitter and random.random() < 0.5:
+            if self.color_jitter:
                 img = F.adjust_brightness(img, random.uniform(1 - self.brightness, 1 + self.brightness))
                 img = F.adjust_contrast(img, random.uniform(1 - self.contrast, 1 + self.contrast))
                 img = F.adjust_saturation(img, random.uniform(1 - self.saturation, 1 + self.saturation))
@@ -154,32 +135,6 @@ class GRAFTTransform:
                         adjusted_boxes.append([flipped_x_min, y_min, flipped_x_max, y_max])
 
                     boxes = adjusted_boxes
-
-            # Random affine transformation
-            if self.random_affine and random.random() < self.affine_prob:
-                # For simplicity, we don't adjust bounding boxes for affine transforms
-                # This is acceptable for training as the boxes are used only for graph building
-                degrees = random.uniform(-self.degrees, self.degrees)
-                translate_x = random.uniform(-self.translate[0], self.translate[0]) * width
-                translate_y = random.uniform(-self.translate[1], self.translate[1]) * height
-                scale = random.uniform(self.scale[0], self.scale[1])
-
-                img = F.affine(
-                    img,
-                    angle=degrees,
-                    translate=(translate_x, translate_y),
-                    scale=scale,
-                    shear=0,
-                    fill=0
-                )
-
-                # Mark boxes as None since we can't easily transform them
-                if boxes is not None:
-                    boxes = None
-
-            # Random blur
-            if self.random_blur and random.random() < self.blur_prob:
-                img = img.filter(Image.BLUR)
 
         # Resize to target size
         img = F.resize(img, (self.img_size, self.img_size))
@@ -207,8 +162,7 @@ class GRAFTTransform:
         img = F.to_tensor(img)
 
         # Normalize
-        if self.normalize:
-            img = F.normalize(img, mean=self.mean, std=self.std)
+        img = F.normalize(img, mean=self.mean, std=self.std)
 
         return img, boxes
 
@@ -220,9 +174,7 @@ def create_transform(
         std: List[float] = [0.229, 0.224, 0.225],
         random_horizontal_flip: bool = True,
         random_crop: bool = True,
-        color_jitter: bool = True,
-        random_affine: bool = True,
-        random_blur: bool = True
+        color_jitter: bool = True
 ) -> GRAFTTransform:
     """
     Create a transformation function for the GRAFT model.
@@ -235,8 +187,6 @@ def create_transform(
         random_horizontal_flip: Whether to apply random horizontal flip.
         random_crop: Whether to apply random crop.
         color_jitter: Whether to apply color jitter.
-        random_affine: Whether to apply random affine transformation.
-        random_blur: Whether to apply random blur.
 
     Returns:
         GRAFTTransform object.
@@ -248,62 +198,8 @@ def create_transform(
         std=std,
         random_horizontal_flip=random_horizontal_flip,
         random_crop=random_crop,
-        color_jitter=color_jitter,
-        random_affine=random_affine,
-        random_blur=random_blur
+        color_jitter=color_jitter
     )
-
-
-def create_autoaugment_transform(
-        img_size: int = 224,
-        mean: List[float] = [0.485, 0.456, 0.406],
-        std: List[float] = [0.229, 0.224, 0.225]
-) -> Callable:
-    """
-    Create a transform with AutoAugment policy for PASCAL VOC.
-
-    Args:
-        img_size: Size to which images will be resized.
-        mean: Mean values for normalization.
-        std: Standard deviation values for normalization.
-
-    Returns:
-        Transform function.
-    """
-    return transforms.Compose([
-        transforms.Resize((img_size, img_size)),
-        transforms.AutoAugment(transforms.AutoAugmentPolicy.IMAGENET),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=mean, std=std)
-    ])
-
-
-def create_randaugment_transform(
-        img_size: int = 224,
-        mean: List[float] = [0.485, 0.456, 0.406],
-        std: List[float] = [0.229, 0.224, 0.225],
-        num_ops: int = 2,
-        magnitude: int = 9
-) -> Callable:
-    """
-    Create a transform with RandAugment policy.
-
-    Args:
-        img_size: Size to which images will be resized.
-        mean: Mean values for normalization.
-        std: Standard deviation values for normalization.
-        num_ops: Number of random operations to apply.
-        magnitude: Magnitude of augmentation operations.
-
-    Returns:
-        Transform function.
-    """
-    return transforms.Compose([
-        transforms.Resize((img_size, img_size)),
-        transforms.RandAugment(num_ops=num_ops, magnitude=magnitude),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=mean, std=std)
-    ])
 
 
 class SimpleTransform:
@@ -316,8 +212,7 @@ class SimpleTransform:
             img_size: int = 224,
             is_train: bool = True,
             mean: List[float] = [0.485, 0.456, 0.406],
-            std: List[float] = [0.229, 0.224, 0.225],
-            use_advanced_augmentation: bool = False  # Option for advanced augmentation
+            std: List[float] = [0.229, 0.224, 0.225]
     ):
         """
         Initialize simple transformations.
@@ -327,24 +222,15 @@ class SimpleTransform:
             is_train: Whether this is for training or validation.
             mean: Mean values for normalization.
             std: Standard deviation values for normalization.
-            use_advanced_augmentation: Whether to use advanced augmentation.
         """
         if is_train:
-            if use_advanced_augmentation:
-                self.transform = transforms.Compose([
-                    transforms.Resize((img_size, img_size)),
-                    transforms.RandAugment(num_ops=2, magnitude=9),
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean=mean, std=std)
-                ])
-            else:
-                self.transform = transforms.Compose([
-                    transforms.Resize((img_size, img_size)),
-                    transforms.RandomHorizontalFlip(),
-                    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean=mean, std=std)
-                ])
+            self.transform = transforms.Compose([
+                transforms.Resize((img_size, img_size)),
+                transforms.RandomHorizontalFlip(),
+                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=mean, std=std)
+            ])
         else:
             self.transform = transforms.Compose([
                 transforms.Resize((img_size, img_size)),
@@ -369,8 +255,7 @@ def create_simple_transform(
         img_size: int = 224,
         is_train: bool = True,
         mean: List[float] = [0.485, 0.456, 0.406],
-        std: List[float] = [0.229, 0.224, 0.225],
-        use_advanced_augmentation: bool = False
+        std: List[float] = [0.229, 0.224, 0.225]
 ) -> SimpleTransform:
     """
     Create a simple transformation function.
@@ -380,7 +265,6 @@ def create_simple_transform(
         is_train: Whether this is for training or validation.
         mean: Mean values for normalization.
         std: Standard deviation values for normalization.
-        use_advanced_augmentation: Whether to use advanced augmentation.
 
     Returns:
         SimpleTransform object.
@@ -389,7 +273,6 @@ def create_simple_transform(
         img_size=img_size,
         is_train=is_train,
         mean=mean,
-        std=std,
-        use_advanced_augmentation=use_advanced_augmentation
+        std=std
     )
 

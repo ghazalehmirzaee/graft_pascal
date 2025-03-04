@@ -9,7 +9,6 @@ from typing import Dict, List, Optional, Tuple, Union, Any
 import os
 import json
 import logging
-import time
 from datetime import datetime
 
 import torch
@@ -20,7 +19,6 @@ from matplotlib.ticker import MaxNLocator
 # Optional W&B import
 try:
     import wandb
-
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
@@ -42,8 +40,7 @@ class GRAFTLogger:
             wandb_entity: Optional[str] = None,
             config: Optional[Dict[str, Any]] = None,
             log_frequency: int = 10,
-            run_name: Optional[str] = None,
-            local_rank: int = 0
+            run_name: Optional[str] = None
     ):
         """
         Initialize logger.
@@ -56,7 +53,6 @@ class GRAFTLogger:
             config: Configuration dictionary for W&B.
             log_frequency: Frequency of logging during training.
             run_name: Optional custom name for the W&B run.
-            local_rank: Local rank for distributed training.
         """
         self.output_dir = output_dir
         self.project_name = project_name
@@ -65,49 +61,44 @@ class GRAFTLogger:
         self.config = config
         self.log_frequency = log_frequency
         self.run_name = run_name
-        self.local_rank = local_rank
-        self.is_primary = local_rank == 0
 
-        # Initialize current_phase
+        # Initialize current_phase BEFORE using it in init_wandb
         self.current_phase = None
 
-        # Create output directory if it doesn't exist and this is the primary process
-        if self.is_primary:
-            os.makedirs(output_dir, exist_ok=True)
+        # Create output directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
 
-            # Create subdirectories
-            self.log_dir = os.path.join(output_dir, "logs")
-            self.checkpoint_dir = os.path.join(output_dir, "checkpoints")
-            self.vis_dir = os.path.join(output_dir, "visualizations")
+        # Create subdirectories
+        self.log_dir = os.path.join(output_dir, "logs")
+        self.checkpoint_dir = os.path.join(output_dir, "checkpoints")
+        self.vis_dir = os.path.join(output_dir, "visualizations")
 
-            os.makedirs(self.log_dir, exist_ok=True)
-            os.makedirs(self.checkpoint_dir, exist_ok=True)
-            os.makedirs(self.vis_dir, exist_ok=True)
+        os.makedirs(self.log_dir, exist_ok=True)
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        os.makedirs(self.vis_dir, exist_ok=True)
 
-            # Set up logging
-            self.setup_logging()
+        # Set up logging
+        self.setup_logging()
 
-            # Initialize W&B
-            if self.use_wandb:
-                self.init_wandb()
+        # Initialize W&B (now current_phase is already defined)
+        if self.use_wandb:
+            self.init_wandb()
 
-            # Initialize metrics storage
-            self.train_metrics = []
-            self.val_metrics = []
-            self.test_metrics = None
+        # Initialize metrics storage
+        self.train_metrics = []
+        self.val_metrics = []
+        self.test_metrics = None
 
-            # Initialize best metrics
-            self.best_val_metric = float("-inf")
-            self.best_epoch = -1
+        # Initialize best metrics
+        self.best_val_metric = float("-inf")
+        self.best_epoch = -1
 
-            # Log initialization
-            self.logger.info(f"Initialized logger for project: {project_name}")
-            self.logger.info(f"Output directory: {output_dir}")
+        # Log initialization
+        self.logger.info(f"Initialized logger for project: {project_name}")
+        self.logger.info(f"Output directory: {output_dir}")
 
-        # Configure step counters for proper W&B logging
-        self.train_step = 0
-        self.val_step = 0
-        self.global_step = 0
+        # Current phase
+        self.current_phase = None
 
     def setup_logging(self):
         """
@@ -116,9 +107,6 @@ class GRAFTLogger:
         # Create logger
         self.logger = logging.getLogger("GRAFT")
         self.logger.setLevel(logging.INFO)
-        # Clear existing handlers if any
-        if self.logger.handlers:
-            self.logger.handlers.clear()
 
         # Create formatter
         formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -140,7 +128,7 @@ class GRAFTLogger:
 
     def init_wandb(self):
         """
-        Initialize Weights & Biases with proper handling for distributed training.
+        Initialize Weights & Biases.
         """
         if not WANDB_AVAILABLE:
             self.logger.warning("Weights & Biases not available. Proceeding without W&B logging.")
@@ -161,13 +149,12 @@ class GRAFTLogger:
             # Extract model and training info if available
             if self.config is not None:
                 # Get model type
-                if "model" in self.config and "backbone" in self.config["model"] and "name" in self.config["model"][
-                    "backbone"]:
+                if "model" in self.config and "backbone" in self.config["model"] and "name" in self.config["model"]["backbone"]:
                     model_type = self.config["model"]["backbone"]["name"]
 
                 # Get learning rate
                 if ("training" in self.config and "optimizer" in self.config["training"] and
-                        "lr" in self.config["training"]["optimizer"]):
+                    "lr" in self.config["training"]["optimizer"]):
                     lr = self.config["training"]["optimizer"]["lr"]
                     lr_str = f"_lr{lr}" if lr else ""
 
@@ -182,29 +169,16 @@ class GRAFTLogger:
             # Combine elements into a descriptive name
             run_name = f"{phase_str}_{model_type}{graph_str}{lr_str}_{timestamp}"
 
-        try:
-            # Initialize W&B with group for distributed training
-            wandb.init(
-                project=self.project_name,
-                entity=self.wandb_entity,
-                config=self.config,
-                dir=self.output_dir,
-                name=run_name,
-                group=self.run_name or "graft_run_group",
-                job_type="train" if self.local_rank == 0 else f"worker_{self.local_rank}"
-            )
+        # Initialize W&B run
+        wandb.init(
+            project=self.project_name,
+            entity=self.wandb_entity,
+            config=self.config,
+            dir=self.output_dir,
+            name=run_name
+        )
 
-            # Log device information
-            if torch.cuda.is_available():
-                wandb.config.update({
-                    "gpu_count": torch.cuda.device_count(),
-                    "gpu_name": torch.cuda.get_device_name(0),
-                })
-
-            self.logger.info(f"Initialized W&B run: {wandb.run.name}")
-        except Exception as e:
-            self.logger.warning(f"Failed to initialize W&B: {e}")
-            self.use_wandb = False
+        self.logger.info(f"Initialized W&B run: {wandb.run.name}")
 
     def set_phase(self, phase: str):
         """
@@ -213,9 +187,6 @@ class GRAFTLogger:
         Args:
             phase: Current phase ("phase1_backbone", "phase2_finetune", etc.).
         """
-        if not self.is_primary:
-            return
-
         self.current_phase = phase
         self.logger.info(f"Starting phase: {phase}")
 
@@ -223,77 +194,47 @@ class GRAFTLogger:
         self.best_val_metric = float("-inf")
         self.best_epoch = -1
 
-        # Reset step counters
-        self.train_step = 0
-        self.val_step = 0
-        self.global_step = 0
-
         # Update W&B run name to include the current phase
         if self.use_wandb and wandb.run is not None:
             # Extract the existing name and add phase if not already there
             current_name = wandb.run.name
             if not current_name.startswith(phase):
                 new_name = f"{phase}_{current_name}"
-                try:
-                    wandb.run.name = new_name
-                    self.logger.info(f"Updated W&B run name to: {new_name}")
-                except:
-                    self.logger.warning(f"Failed to update W&B run name")
+                wandb.run.name = new_name
+                self.logger.info(f"Updated W&B run name to: {new_name}")
 
-    def log_metrics(self, metrics: Dict[str, Any], epoch: int, mode: str = "train"):
+    def log_metrics(self, metrics: Dict[str, Any], step: int, mode: str = "train"):
         """
-        Log metrics with improved step handling for distributed training.
+        Log metrics.
 
         Args:
             metrics: Dictionary of metrics.
-            epoch: Current epoch.
+            step: Current step.
             mode: Mode ("train", "val", or "test").
         """
-        if not self.is_primary:
-            return
-
-        # Update steps based on mode
-        if mode == "train":
-            step = self.train_step
-            self.train_step += 1
-        elif mode == "val":
-            step = self.val_step
-            self.val_step += 1
-        else:  # test
-            step = epoch
-
-        # Update global step
-        self.global_step = max(self.global_step, step)
-
         # Log to console
-        if (mode == "train" and step % self.log_frequency == 0) or mode != "train":
-            metric_str = " | ".join(
-                [f"{k}: {v:.4f}" if isinstance(v, (float, int, np.number)) else f"{k}: {v}" for k, v in
-                 metrics.items()])
-            self.logger.info(f"{mode.capitalize()} [{epoch}] - {metric_str}")
+        if step % self.log_frequency == 0 or mode != "train":
+            metric_str = " | ".join([f"{k}: {v:.4f}" if isinstance(v, (float, int)) else f"{k}: {v}" for k, v in metrics.items()])
+            self.logger.info(f"{mode.capitalize()} [{step}] - {metric_str}")
 
         # Log to W&B
         if self.use_wandb:
-            try:
-                # Add mode prefix to metrics
-                wandb_metrics = {f"{mode}/{k}": v for k, v in metrics.items() if isinstance(v, (float, int, np.number))}
+            # Add mode prefix to metrics
+            wandb_metrics = {f"{mode}/{k}": v for k, v in metrics.items() if isinstance(v, (float, int, np.number))}
 
-                # Add epoch
-                wandb_metrics["epoch"] = epoch
+            # Add step
+            wandb_metrics["epoch"] = step
 
-                # Add phase if available
-                if self.current_phase is not None:
-                    wandb_metrics["phase"] = self.current_phase
+            # Add phase if available
+            if self.current_phase is not None:
+                wandb_metrics["phase"] = self.current_phase
 
-                # Log to W&B with appropriate step
-                wandb.log(wandb_metrics, step=self.global_step)
-            except Exception as e:
-                self.logger.warning(f"Failed to log to W&B: {e}")
+            # Log to W&B
+            wandb.log(wandb_metrics, step=step)
 
         # Store metrics
         metrics_copy = metrics.copy()
         metrics_copy["step"] = step
-        metrics_copy["epoch"] = epoch
 
         if mode == "train":
             self.train_metrics.append(metrics_copy)
@@ -309,19 +250,12 @@ class GRAFTLogger:
         Args:
             hyperparams: Dictionary of hyperparameters.
         """
-        if not self.is_primary:
-            return
-
         # Log to console
         self.logger.info(f"Hyperparameters: {json.dumps(hyperparams, indent=2)}")
 
         # Log to W&B
         if self.use_wandb:
-            try:
-                # Use update method instead of directly assigning to config
-                wandb.config.update(hyperparams, allow_val_change=True)
-            except Exception as e:
-                self.logger.warning(f"Failed to log hyperparameters to W&B: {e}")
+            wandb.config.update(hyperparams, allow_val_change=True)  # Added allow_val_change=True
 
     def log_model_summary(self, model_summary: str):
         """
@@ -330,9 +264,6 @@ class GRAFTLogger:
         Args:
             model_summary: Model summary string.
         """
-        if not self.is_primary:
-            return
-
         # Log to console
         self.logger.info(f"Model Summary:\n{model_summary}")
 
@@ -343,10 +274,7 @@ class GRAFTLogger:
 
         # Log to W&B
         if self.use_wandb:
-            try:
-                wandb.run.summary["model_summary"] = model_summary
-            except Exception as e:
-                self.logger.warning(f"Failed to log model summary to W&B: {e}")
+            wandb.run.summary["model_summary"] = model_summary
 
     def save_checkpoint(
             self,
@@ -366,9 +294,6 @@ class GRAFTLogger:
             metrics: Dictionary of metrics.
             is_best: Whether this is the best model so far.
         """
-        if not self.is_primary:
-            return
-
         # Create checkpoint
         checkpoint = {
             "model_state_dict": model_state_dict,
@@ -395,29 +320,26 @@ class GRAFTLogger:
 
         # Log to W&B
         if self.use_wandb:
-            try:
-                # Save checkpoint as W&B artifact
-                artifact = wandb.Artifact(
-                    name=f"model-{phase_prefix}{epoch}",
+            # Save checkpoint as W&B artifact
+            artifact = wandb.Artifact(
+                name=f"model-{phase_prefix}{epoch}",
+                type="model",
+                description=f"Model checkpoint at epoch {epoch}",
+                metadata=metrics
+            )
+            artifact.add_file(checkpoint_path, name=f"checkpoint_epoch_{epoch}.pth")
+            wandb.log_artifact(artifact)
+
+            # Track best model
+            if is_best:
+                best_artifact = wandb.Artifact(
+                    name=f"best-model-{phase_prefix}",
                     type="model",
-                    description=f"Model checkpoint at epoch {epoch}",
+                    description=f"Best model at epoch {epoch}",
                     metadata=metrics
                 )
-                artifact.add_file(checkpoint_path, name=f"checkpoint_epoch_{epoch}.pth")
-                wandb.log_artifact(artifact)
-
-                # Track best model
-                if is_best:
-                    best_artifact = wandb.Artifact(
-                        name=f"best-model-{phase_prefix}",
-                        type="model",
-                        description=f"Best model at epoch {epoch}",
-                        metadata=metrics
-                    )
-                    best_artifact.add_file(best_path, name="best_model.pth")
-                    wandb.log_artifact(best_artifact)
-            except Exception as e:
-                self.logger.warning(f"Failed to log checkpoint to W&B: {e}")
+                best_artifact.add_file(best_path, name="best_model.pth")
+                wandb.log_artifact(best_artifact)
 
     def log_graph_visualizations(self, graph_data: Dict[str, Any], epoch: int):
         """
@@ -427,9 +349,6 @@ class GRAFTLogger:
             graph_data: Dictionary containing graph data.
             epoch: Current epoch.
         """
-        if not self.is_primary:
-            return
-
         # Save graph visualizations locally
         phase_prefix = f"{self.current_phase}_" if self.current_phase is not None else ""
         vis_path = os.path.join(self.vis_dir, f"{phase_prefix}graph_vis_epoch_{epoch}.png")
@@ -440,32 +359,27 @@ class GRAFTLogger:
 
         # Log to W&B
         if self.use_wandb:
-            try:
-                # Log figures
-                if "fig" in graph_data:
-                    wandb.log({f"graph_visualization/epoch_{epoch}": wandb.Image(graph_data["fig"])},
-                              step=self.global_step)
+            if "fig" in graph_data:
+                wandb.log({f"graph_visualization/epoch_{epoch}": wandb.Image(graph_data["fig"])})
 
-                # Log adjacency matrices as heatmaps
-                for graph_name, adj_matrix in graph_data.items():
-                    if graph_name != "fig" and isinstance(adj_matrix, (np.ndarray, torch.Tensor)):
-                        if isinstance(adj_matrix, torch.Tensor):
-                            adj_matrix = adj_matrix.detach().cpu().numpy()
+            # Log adjacency matrices
+            for graph_name, adj_matrix in graph_data.items():
+                if graph_name != "fig" and isinstance(adj_matrix, (np.ndarray, torch.Tensor)):
+                    if isinstance(adj_matrix, torch.Tensor):
+                        adj_matrix = adj_matrix.detach().cpu().numpy()
 
-                        # Create heatmap
-                        fig, ax = plt.subplots(figsize=(10, 8))
-                        im = ax.imshow(adj_matrix, cmap="Blues")
-                        plt.colorbar(im, ax=ax)
-                        ax.set_title(f"{graph_name} Adjacency Matrix")
+                    # Create heatmap
+                    fig, ax = plt.subplots(figsize=(10, 8))
+                    im = ax.imshow(adj_matrix, cmap="Blues")
+                    plt.colorbar(im, ax=ax)
+                    ax.set_title(f"{graph_name} Adjacency Matrix")
 
-                        # Log to W&B
-                        wandb.log({f"graph_adjacency/{graph_name}_epoch_{epoch}": wandb.Image(fig)},
-                                  step=self.global_step)
+                    # Log to W&B
+                    wandb.log({f"graph_adjacency/{graph_name}_epoch_{epoch}": wandb.Image(fig)})
 
-                        # Close figure to prevent memory leaks
-                        plt.close(fig)
-            except Exception as e:
-                self.logger.warning(f"Failed to log graph visualizations to W&B: {e}")
+                    # Close figure
+                    plt.close(fig)
+
 
     def plot_training_curves(self, save_path: Optional[str] = None):
         """
@@ -473,19 +387,13 @@ class GRAFTLogger:
 
         Args:
             save_path: Path to save the plot.
-
-        Returns:
-            Matplotlib figure.
         """
-        if not self.is_primary:
-            return
-
         # Create figure
         fig, axes = plt.subplots(1, 2, figsize=(15, 6))
 
         # Extract metrics
-        train_epochs = [m.get("epoch", 0) for m in self.train_metrics]
-        val_epochs = [m.get("epoch", 0) for m in self.val_metrics]
+        train_epochs = [m["step"] for m in self.train_metrics]
+        val_epochs = [m["step"] for m in self.val_metrics]
 
         train_loss = [m.get("loss", 0.0) for m in self.train_metrics]
         val_loss = [m.get("loss", 0.0) for m in self.val_metrics]
@@ -539,20 +447,14 @@ class GRAFTLogger:
 
         # Log to W&B
         if self.use_wandb:
-            try:
-                wandb.log({"training_curves": wandb.Image(fig)}, step=self.global_step)
-            except Exception as e:
-                self.logger.warning(f"Failed to log training curves to W&B: {e}")
+            wandb.log({"training_curves": wandb.Image(fig)})
 
         return fig
 
     def finish(self):
         """
-        Finish logging with proper cleanup.
+        Finish logging.
         """
-        if not self.is_primary:
-            return
-
         # Plot training curves
         self.plot_training_curves()
 
@@ -560,36 +462,11 @@ class GRAFTLogger:
         phase_prefix = f"{self.current_phase}_" if self.current_phase is not None else ""
         metrics_path = os.path.join(self.log_dir, f"{phase_prefix}metrics.json")
 
-        # Convert metrics for JSON serialization
-        train_metrics_json = []
-        for metric in self.train_metrics:
-            metric_json = {}
-            for k, v in metric.items():
-                if isinstance(v, (np.ndarray, np.number)):
-                    metric_json[k] = v.item() if hasattr(v, 'item') else float(v)
-                elif isinstance(v, (list, tuple)) and len(v) > 0 and isinstance(v[0], (np.ndarray, np.number)):
-                    metric_json[k] = [x.item() if hasattr(x, 'item') else float(x) for x in v]
-                else:
-                    metric_json[k] = v
-            train_metrics_json.append(metric_json)
-
-        val_metrics_json = []
-        for metric in self.val_metrics:
-            metric_json = {}
-            for k, v in metric.items():
-                if isinstance(v, (np.ndarray, np.number)):
-                    metric_json[k] = v.item() if hasattr(v, 'item') else float(v)
-                elif isinstance(v, (list, tuple)) and len(v) > 0 and isinstance(v[0], (np.ndarray, np.number)):
-                    metric_json[k] = [x.item() if hasattr(x, 'item') else float(x) for x in v]
-                else:
-                    metric_json[k] = v
-            val_metrics_json.append(metric_json)
-
         metrics_data = {
-            "train_metrics": train_metrics_json,
-            "val_metrics": val_metrics_json,
+            "train_metrics": self.train_metrics,
+            "val_metrics": self.val_metrics,
             "test_metrics": self.test_metrics,
-            "best_val_metric": float(self.best_val_metric),
+            "best_val_metric": self.best_val_metric,
             "best_epoch": self.best_epoch
         }
 
@@ -601,20 +478,17 @@ class GRAFTLogger:
 
         # Finish W&B run
         if self.use_wandb:
-            try:
-                # Log summary metrics
-                wandb.run.summary["best_val_metric"] = self.best_val_metric
-                wandb.run.summary["best_epoch"] = self.best_epoch
+            # Log summary metrics
+            wandb.run.summary["best_val_metric"] = self.best_val_metric
+            wandb.run.summary["best_epoch"] = self.best_epoch
 
-                if self.test_metrics is not None:
-                    for k, v in self.test_metrics.items():
-                        if isinstance(v, (float, int, np.number)):
-                            wandb.run.summary[f"test_{k}"] = v
+            if self.test_metrics is not None:
+                for k, v in self.test_metrics.items():
+                    if isinstance(v, (float, int, np.number)):
+                        wandb.run.summary[f"test_{k}"] = v
 
-                # Finish run
-                wandb.finish()
-            except Exception as e:
-                self.logger.warning(f"Failed to finish W&B run: {e}")
+            # Finish run
+            wandb.finish()
 
     def load_checkpoint(self, checkpoint_path: str) -> Dict[str, Any]:
         """
@@ -626,11 +500,6 @@ class GRAFTLogger:
         Returns:
             Checkpoint dictionary.
         """
-        if not self.is_primary:
-            # For non-primary processes, other processes might need to wait
-            # until the primary has loaded the checkpoint
-            return {}
-
         self.logger.info(f"Loading checkpoint from {checkpoint_path}")
 
         # Load checkpoint
@@ -638,21 +507,18 @@ class GRAFTLogger:
 
         return checkpoint
 
-
 def create_logger(
         config: Dict[str, Any],
         output_dir: Optional[str] = None,
-        experiment_name: Optional[str] = None,
-        local_rank: int = 0
+        experiment_name: Optional[str] = None
 ) -> GRAFTLogger:
     """
-    Create a GRAFT logger with distributed training support.
+    Create a GRAFT logger.
 
     Args:
         config: Configuration dictionary.
         output_dir: Output directory (overrides config if provided).
         experiment_name: Optional custom name for the experiment.
-        local_rank: Local rank for distributed training.
 
     Returns:
         GRAFTLogger instance.
@@ -674,10 +540,7 @@ def create_logger(
         wandb_entity=wandb_entity,
         config=config,
         log_frequency=10,
-        run_name=experiment_name,
-        local_rank=local_rank
+        run_name=experiment_name  # Pass the custom name
     )
 
     return logger
-
-

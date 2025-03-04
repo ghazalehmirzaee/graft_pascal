@@ -1,5 +1,3 @@
-# Default configuration for GRAFT on PASCAL VOC
-
 # General settings
 project_name: "GRAFT-PASCAL"
 seed: 42
@@ -13,7 +11,7 @@ wandb:
 # Dataset settings
 dataset:
   name: "pascal_voc"
-  root: "/NewRaidData/ghazal/data/pascal"
+  root: "/path/to/pascal"  # Update this with your actual path
   img_size: 224
   num_classes: 20
 
@@ -22,9 +20,6 @@ dataset:
     random_horizontal_flip: true
     random_crop: true
     color_jitter: true
-    random_affine: true
-    random_blur: true
-    use_randaugment: false
 
   # Data normalization
   normalization:
@@ -37,13 +32,10 @@ dataset:
 
 # Model settings
 model:
-  gradient_checkpointing: true
   backbone:
     name: "vit_base_patch16_224"
     pretrained: true
     pretrained_weights: "./mae_pretrained_vit_base.pth"
-    drop_path_rate: 0.1
-    representation_size: null
 
   # Graph components
   graphs:
@@ -69,27 +61,28 @@ model:
       tier1_threshold: 50
       tier2_threshold: 10
 
+    # Semantic relationship graph
+    semantic:
+      enabled: true
+      dimension_weights: [0.3, 0.4, 0.3]
+      adaptation_factor: 0.7
+
     # Graph fusion
     fusion:
-      initial_uncertainties: [1.0, 1.0, 1.0]
+      initial_uncertainties: [1.0, 1.0, 1.0, 1.0]
 
 # Loss function
 loss:
   wbce_weight: 1.0
   focal_weight: 1.0
   asl_weight: 1.0
-  cb_weight: 1.0
   focal_gamma: 2.0
-  focal_alpha: 0.25
-  asl_gamma_neg: 4.0
-  asl_beta: 0.0
+  asl_beta: 4.0
 
 # Training settings
 training:
 #  epochs: 100
   epochs: 1
-  grad_accumulation_steps: 1
-  ddp_find_unused_parameters: false
 
   optimizer:
     name: "adamw"
@@ -98,7 +91,7 @@ training:
     weight_decay: 0.05
 
   scheduler:
-    name: "cosine_annealing"
+    name: "cosine_annealing_warm_restarts"
     T_0: 5
     T_mult: 2
 
@@ -136,6 +129,7 @@ phases:
 #      epochs: 50
       epochs: 1
 
+
   phase3_graphs:
     description: "Graph construction without training"
     model:
@@ -143,7 +137,6 @@ phases:
         enabled: true
     training:
       enabled: false
-      epochs: 0
 
   phase4_integration:
     description: "Progressive graph integration"
@@ -152,11 +145,6 @@ phases:
         enabled: true
     training:
       enabled: true
-#      epochs: 50
-      epochs: 1
-      optimizer:
-        lr: 5e-5
-        weight_decay: 0.01
 
   phase5_refinement:
     description: "Model refinement with all components"
@@ -165,9 +153,7 @@ phases:
         enabled: true
     training:
       enabled: true
-#      epochs: 30
       epochs: 1
-      optimizer:
-        lr: 1e-5
-        weight_decay: 0.01
+#      epochs: 30
+
 

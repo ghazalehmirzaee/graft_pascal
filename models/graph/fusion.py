@@ -25,7 +25,7 @@ class GraphAttentionLayer(nn.Module):
             self,
             in_features: int,
             out_features: int,
-            dropout: float = 0.2,
+            dropout: float = 0.1,
             alpha: float = 0.2,
             concat: bool = True
     ):
@@ -119,11 +119,10 @@ class ContextualGraphFusion(nn.Module):
             self,
             num_classes: int,
             feature_dim: int,
-            num_graphs: int = 3,  # Changed from 4 to 3 since semantic graph was removed
+            num_graphs: int = 4,
             hidden_dim: int = 128,
-            dropout: float = 0.2,
-            initial_uncertainties: Optional[List[float]] = None,
-            multi_head: bool = True
+            dropout: float = 0.1,
+            initial_uncertainties: Optional[List[float]] = None
     ):
         """
         Initialize Graph Fusion Network.
@@ -135,48 +134,23 @@ class ContextualGraphFusion(nn.Module):
             hidden_dim: Hidden layer dimension.
             dropout: Dropout probability.
             initial_uncertainties: Initial uncertainty estimates for each graph.
-            multi_head: Whether to use multiple attention heads.
         """
         super().__init__()
         self.num_classes = num_classes
         self.feature_dim = feature_dim
         self.num_graphs = num_graphs
         self.hidden_dim = hidden_dim
-        self.multi_head = multi_head
 
         # Initialize graph-specific attention layers
-        if multi_head:
-            # Multi-head attention with 2 heads
-            self.attention_heads = nn.ModuleList([
-                nn.ModuleList([
-                    GraphAttentionLayer(
-                        in_features=feature_dim,
-                        out_features=hidden_dim // 2,  # Split dimension between heads
-                        dropout=dropout,
-                        concat=True
-                    ) for _ in range(2)  # 2 attention heads
-                ]) for _ in range(num_graphs)
-            ])
-
-            # Output projection after concatenating heads
-            self.head_projections = nn.ModuleList([
-                nn.Sequential(
-                    nn.Linear(hidden_dim, hidden_dim),
-                    nn.LayerNorm(hidden_dim),
-                    nn.ReLU(),
-                    nn.Dropout(dropout)
-                ) for _ in range(num_graphs)
-            ])
-        else:
-            # Single-head attention
-            self.attention_layers = nn.ModuleList([
-                GraphAttentionLayer(
-                    in_features=feature_dim,
-                    out_features=hidden_dim,
-                    dropout=dropout,
-                    concat=True
-                ) for _ in range(num_graphs)
-            ])
+        self.attention_layers = nn.ModuleList([
+            GraphAttentionLayer(
+                in_features=feature_dim,
+                out_features=hidden_dim,
+                dropout=dropout,
+                concat=True
+            )
+            for _ in range(num_graphs)
+        ])
 
         # Initialize graph uncertainty estimates
         if initial_uncertainties is not None:
@@ -191,14 +165,10 @@ class ContextualGraphFusion(nn.Module):
         # Output projection
         self.output_proj = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, feature_dim)
         )
-
-        # Layer normalization for stabilizing training
-        self.layer_norm = nn.LayerNorm(feature_dim)
 
     def forward(
             self,
@@ -221,32 +191,17 @@ class ContextualGraphFusion(nn.Module):
 
         # Compute uncertainty weights
         uncertainties = torch.exp(self.log_uncertainties)
-        attention_weights = 1.0 / (uncertainties + 1e-10)  # Add epsilon to prevent division by zero
+        attention_weights = 1.0 / uncertainties
         attention_weights = F.softmax(attention_weights, dim=0)
 
         # Apply graph-specific attention layers
         graph_outputs = []
-
-        for i in range(self.num_graphs):
+        for i, (attention_layer, adj) in enumerate(zip(self.attention_layers, adj_matrices)):
             # Expand adjacency matrix to batch size
-            batch_adj = adj_matrices[i].unsqueeze(0).expand(batch_size, -1, -1)
+            batch_adj = adj.unsqueeze(0).expand(batch_size, -1, -1)
 
-            if self.multi_head:
-                # Apply multi-head attention
-                head_outputs = []
-                for head in self.attention_heads[i]:
-                    head_output = head(x, batch_adj)
-                    head_outputs.append(head_output)
-
-                # Concatenate heads
-                multi_head_output = torch.cat(head_outputs, dim=2)
-
-                # Apply projection
-                graph_output = self.head_projections[i](multi_head_output)
-            else:
-                # Apply single-head attention
-                graph_output = self.attention_layers[i](x, batch_adj)
-
+            # Apply attention layer
+            graph_output = attention_layer(x, batch_adj)
             graph_outputs.append(graph_output)
 
         # Weight and combine graph outputs
@@ -257,23 +212,19 @@ class ContextualGraphFusion(nn.Module):
         # Apply output projection
         fused_output = self.output_proj(fused_output)
 
-        # Layer normalization
-        fused_output = self.layer_norm(fused_output)
-
         # Skip connection
-        x_out = x + fused_output
+        fused_output = x + fused_output
 
-        return x_out
+        return fused_output
 
 
 def create_graph_fusion_network(
         num_classes: int,
         feature_dim: int,
-        num_graphs: int = 3,  # Changed from 4 to 3 since semantic graph was removed
+        num_graphs: int = 4,
         hidden_dim: int = 128,
-        dropout: float = 0.2,
-        initial_uncertainties: Optional[List[float]] = None,
-        multi_head: bool = True
+        dropout: float = 0.1,
+        initial_uncertainties: Optional[List[float]] = None
 ) -> ContextualGraphFusion:
     """
     Create a Graph Fusion Network.
@@ -285,7 +236,6 @@ def create_graph_fusion_network(
         hidden_dim: Hidden layer dimension.
         dropout: Dropout probability.
         initial_uncertainties: Initial uncertainty estimates for each graph.
-        multi_head: Whether to use multiple attention heads.
 
     Returns:
         ContextualGraphFusion module.
@@ -296,7 +246,6 @@ def create_graph_fusion_network(
         num_graphs=num_graphs,
         hidden_dim=hidden_dim,
         dropout=dropout,
-        initial_uncertainties=initial_uncertainties,
-        multi_head=multi_head
+        initial_uncertainties=initial_uncertainties
     )
 

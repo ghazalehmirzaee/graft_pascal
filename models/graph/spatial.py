@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 
 class SpatialRelationshipGraph(nn.Module):
@@ -27,8 +28,7 @@ class SpatialRelationshipGraph(nn.Module):
             scales: List[int] = [5, 15, 25],
             scale_weights: List[float] = [0.2, 0.3, 0.5],
             positional_adjustment: float = 0.2,
-            spatial_statistics: Optional[Dict[str, torch.Tensor]] = None,
-            smoothing_factor: float = 0.01
+            spatial_statistics: Optional[Dict[str, torch.Tensor]] = None
     ):
         """
         Initialize Spatial Relationship Graph.
@@ -39,14 +39,12 @@ class SpatialRelationshipGraph(nn.Module):
             scale_weights: Weights for each scale.
             positional_adjustment: Factor for adjusting positional relationships.
             spatial_statistics: Pre-computed spatial statistics.
-            smoothing_factor: Small value to avoid division by zero.
         """
         super().__init__()
         self.num_classes = num_classes
         self.scales = scales
         self.scale_weights = scale_weights
         self.positional_adjustment = positional_adjustment
-        self.smoothing_factor = smoothing_factor
 
         assert len(scales) == len(scale_weights), "Scales and weights must have the same length"
         assert sum(scale_weights) == 1.0, "Scale weights must sum to 1.0"
@@ -61,10 +59,8 @@ class SpatialRelationshipGraph(nn.Module):
             self.register_buffer("sizes", torch.zeros(num_classes, 2))  # [num_classes, 2]
             self.register_buffer("overlaps", torch.zeros(num_classes, num_classes))  # [num_classes, num_classes]
 
-        # Track number of observations for each class
-        self.register_buffer("position_counts", torch.zeros(num_classes))
-
         # Initialize multi-scale spatial distributions
+        self.distributions = {}
         for scale in scales:
             self.register_buffer(f"distribution_{scale}", torch.zeros(num_classes, scale, scale))
 
@@ -78,12 +74,15 @@ class SpatialRelationshipGraph(nn.Module):
         self.relative_pos_embedding = nn.Parameter(torch.randn(3, 3, 16))  # 3x3 for above/below/same, left/right/same
         nn.init.xavier_uniform_(self.relative_pos_embedding)
 
+        # Learnable position embedding for overlap
+        self.overlap_embedding = nn.Parameter(torch.randn(16))
+        nn.init.xavier_uniform_(self.overlap_embedding)
+
         # Position projection layer
         self.pos_proj = nn.Sequential(
             nn.Linear(16, 32),
             nn.ReLU(),
-            nn.Linear(32, 1),
-            nn.Sigmoid()
+            nn.Linear(32, 1)
         )
 
     def _compute_spatial_distribution(self, scale: int):
@@ -97,62 +96,82 @@ class SpatialRelationshipGraph(nn.Module):
 
         # For each class, generate a distribution based on position and size
         for c in range(self.num_classes):
-            if self.position_counts[c] > 0:
-                # Get normalized position and size
-                pos_x, pos_y = self.positions[c] / self.position_counts[c]
-                size_x, size_y = self.sizes[c] / self.position_counts[c]
-
-                # Create grid
-                x = torch.linspace(0, 1, scale, device=self.positions.device)
-                y = torch.linspace(0, 1, scale, device=self.positions.device)
-                grid_y, grid_x = torch.meshgrid(y, x, indexing='ij')
-
-                # Compute gaussian distribution
-                sigma_x = max(0.05, size_x / 4)  # Scale sigma based on object size
-                sigma_y = max(0.05, size_y / 4)
-
-                # Avoid zero/nan values
-                if torch.abs(pos_x) < 1e-5 and torch.abs(pos_y) < 1e-5:
-                    # If no valid position data, create uniform distribution
-                    distribution[c] = 1.0 / (scale * scale)
-                else:
-                    dist_x = -((grid_x - pos_x) ** 2) / (2 * sigma_x ** 2 + self.smoothing_factor)
-                    dist_y = -((grid_y - pos_y) ** 2) / (2 * sigma_y ** 2 + self.smoothing_factor)
-                    dist = torch.exp(dist_x + dist_y)
-
-                    # Normalize
-                    if torch.sum(dist) > 0:
-                        dist = dist / torch.sum(dist)
-                    else:
-                        dist = torch.ones_like(dist) / (scale * scale)
-
-                    distribution[c] = dist
-            else:
+            if torch.all(self.sizes[c] == 0):
                 # No spatial information for this class
-                # Create uniform distribution
+                # Create a uniform distribution
                 distribution[c] = 1.0 / (scale * scale)
+                continue
+
+            # Get position and size
+            pos_x, pos_y = self.positions[c]
+            size_x, size_y = self.sizes[c]
+
+            # Create grid
+            x = torch.linspace(0, 1, scale, device=self.positions.device)
+            y = torch.linspace(0, 1, scale, device=self.positions.device)
+            grid_y, grid_x = torch.meshgrid(y, x)
+
+            # Compute gaussian distribution
+            sigma_x = max(0.01, size_x / 4)  # Scale sigma based on object size
+            sigma_y = max(0.01, size_y / 4)
+
+            dist_x = -((grid_x - pos_x) ** 2) / (2 * sigma_x ** 2)
+            dist_y = -((grid_y - pos_y) ** 2) / (2 * sigma_y ** 2)
+            dist = torch.exp(dist_x + dist_y)
+
+            # Normalize
+            if torch.sum(dist) > 0:
+                dist = dist / torch.sum(dist)
+
+            distribution[c] = dist
 
         return distribution
 
-    def _compute_similarity(self, dist1: torch.Tensor, dist2: torch.Tensor) -> float:
+    def _earth_movers_distance(self, dist1: torch.Tensor, dist2: torch.Tensor) -> float:
         """
-        Compute similarity between two spatial distributions.
+        Compute Earth Mover's Distance (EMD) between two distributions.
 
         Args:
             dist1: First distribution of shape [H, W].
             dist2: Second distribution of shape [H, W].
 
         Returns:
-            Similarity score (higher means more similar).
+            EMD as a float.
         """
+        # Convert to numpy for scipy solver
+        dist1_np = dist1.detach().cpu().numpy()
+        dist2_np = dist2.detach().cpu().numpy()
+
         # Flatten distributions
-        dist1_flat = dist1.flatten()
-        dist2_flat = dist2.flatten()
+        dist1_flat = dist1_np.flatten()
+        dist2_flat = dist2_np.flatten()
 
-        # Compute cosine similarity
-        similarity = F.cosine_similarity(dist1_flat.unsqueeze(0), dist2_flat.unsqueeze(0), dim=1)
+        # Ensure distributions sum to 1
+        if np.sum(dist1_flat) > 0:
+            dist1_flat = dist1_flat / np.sum(dist1_flat)
+        if np.sum(dist2_flat) > 0:
+            dist2_flat = dist2_flat / np.sum(dist2_flat)
 
-        return similarity.item()
+        # Compute cost matrix
+        n = len(dist1_flat)
+        cost_matrix = np.zeros((n, n))
+
+        h, w = dist1.shape
+        for i in range(h):
+            for j in range(w):
+                for k in range(h):
+                    for l in range(w):
+                        i_idx = i * w + j
+                        j_idx = k * w + l
+                        # Euclidean distance in grid space
+                        cost_matrix[i_idx, j_idx] = np.sqrt((i - k) ** 2 + (j - l) ** 2) / np.sqrt(h ** 2 + w ** 2)
+
+        # Solve EMD using linear_sum_assignment
+        # This is a simplified version of EMD, assuming equal weights
+        row_idx, col_idx = linear_sum_assignment(cost_matrix)
+        emd = cost_matrix[row_idx, col_idx].sum() / len(row_idx)
+
+        return float(emd)
 
     def build_graph(self):
         """
@@ -164,54 +183,59 @@ class SpatialRelationshipGraph(nn.Module):
                 distribution = self._compute_spatial_distribution(scale)
                 self.register_buffer(f"distribution_{scale}", distribution)
 
-            # Compute edge weights based on multi-scale distribution similarity
+            # Compute edge weights based on Earth Mover's Distance at multiple scales
             edge_weights = torch.zeros(self.num_classes, self.num_classes, device=self.positions.device)
 
             for i in range(self.num_classes):
                 for j in range(self.num_classes):
                     if i != j:
-                        similarity_sum = 0.0
+                        emd_sum = 0.0
 
-                        # Compute similarity at each scale
+                        # Compute EMD at each scale
                         for scale_idx, scale in enumerate(self.scales):
                             dist_i = getattr(self, f"distribution_{scale}")[i]
                             dist_j = getattr(self, f"distribution_{scale}")[j]
 
-                            # Compute similarity
-                            similarity = self._compute_similarity(dist_i, dist_j)
+                            # Compute EMD
+                            emd = self._earth_movers_distance(dist_i, dist_j)
+
+                            # Lower EMD means higher similarity
+                            similarity = 1.0 - emd
 
                             # Apply scale weight
-                            similarity_sum += self.scale_weights[scale_idx] * similarity
+                            emd_sum += self.scale_weights[scale_idx] * similarity
 
-                        # Add positional relationship from overlaps if available
-                        if self.position_counts[i] > 0 and self.position_counts[j] > 0:
-                            # Normalize positions
-                            pos_i = self.positions[i] / self.position_counts[i]
-                            pos_j = self.positions[j] / self.position_counts[j]
+                        # Add positional relationship
+                        pos_i, pos_j = self.positions[i], self.positions[j]
+                        size_i, size_j = self.sizes[i], self.sizes[j]
 
-                            # Compute relative position
-                            rel_x = 1 if pos_i[0] < pos_j[0] else (2 if pos_i[0] > pos_j[0] else 0)
-                            rel_y = 1 if pos_i[1] < pos_j[1] else (2 if pos_i[1] > pos_j[1] else 0)
+                        # Compute relative position
+                        rel_x = 1 if pos_i[0] < pos_j[0] else (2 if pos_i[0] > pos_j[0] else 0)
+                        rel_y = 1 if pos_i[1] < pos_j[1] else (2 if pos_i[1] > pos_j[1] else 0)
 
-                            # Get embedding for relative position
-                            pos_emb = self.relative_pos_embedding[rel_y, rel_x]
+                        # Get embedding for relative position
+                        pos_emb = self.relative_pos_embedding[rel_y, rel_x]
 
-                            # Project to edge weight adjustment
-                            pos_adjustment = self.pos_proj(pos_emb)
+                        # Get embedding for overlap
+                        overlap = self.overlaps[i, j]
+                        overlap_emb = self.overlap_embedding * overlap
 
-                            # Apply adjustment
-                            edge_weights[i, j] = similarity_sum * (1.0 + self.positional_adjustment * pos_adjustment)
-                        else:
-                            edge_weights[i, j] = similarity_sum
+                        # Combine embeddings
+                        combined_emb = pos_emb + overlap_emb
 
-            # Apply row-wise softmax to create proper probability distributions
-            edge_weights = F.softmax(edge_weights * 5.0, dim=1)  # Temperature scaling for sharper distribution
+                        # Project to edge weight adjustment
+                        pos_adjustment = torch.sigmoid(self.pos_proj(combined_emb))
 
-            # Add self-loops with small weight
-            eye = torch.eye(self.num_classes, device=edge_weights.device)
-            edge_weights = edge_weights * (1 - 0.1) + eye * 0.1
+                        # Apply adjustment
+                        edge_weights[i, j] = emd_sum * (1.0 + self.positional_adjustment * pos_adjustment)
+
+            # Normalize edge weights
+            max_weight = torch.max(edge_weights)
+            if max_weight > 0:
+                edge_weights = edge_weights / max_weight
 
             self.edge_weights = edge_weights
+
             self.graph_built = True
 
     def update_statistics(self, batch_positions: torch.Tensor, batch_sizes: torch.Tensor, batch_classes: torch.Tensor):
@@ -225,12 +249,16 @@ class SpatialRelationshipGraph(nn.Module):
         """
         # For each class, update position and size
         for i, cls_idx in enumerate(batch_classes):
-            # Update position counts
-            self.position_counts[cls_idx] += 1.0
-
-            # Update position and size (accumulate)
-            self.positions[cls_idx] += batch_positions[i]
-            self.sizes[cls_idx] += batch_sizes[i]
+            # Update position (running average)
+            old_count = self.sizes[cls_idx, 0] > 0
+            if old_count:
+                # Update with running average
+                self.positions[cls_idx] = (self.positions[cls_idx] + batch_positions[i]) / 2
+                self.sizes[cls_idx] = (self.sizes[cls_idx] + batch_sizes[i]) / 2
+            else:
+                # Initialize
+                self.positions[cls_idx] = batch_positions[i]
+                self.sizes[cls_idx] = batch_sizes[i]
 
         # Update overlap statistics
         # Group by image
@@ -273,8 +301,8 @@ class SpatialRelationshipGraph(nn.Module):
                     iou = intersection / union if union > 0 else 0
 
                     # Update overlap
-                    self.overlaps[cls_i, cls_j] += iou
-                    self.overlaps[cls_j, cls_i] += iou
+                    self.overlaps[cls_i, cls_j] = (self.overlaps[cls_i, cls_j] + iou) / 2
+                    self.overlaps[cls_j, cls_i] = self.overlaps[cls_i, cls_j]
 
         # Mark graph as not built to trigger rebuild
         self.graph_built = False
@@ -309,9 +337,8 @@ class SpatialRelationshipGraph(nn.Module):
         # edge_weights: [num_classes, num_classes]
         x_transformed = torch.bmm(self.edge_weights.unsqueeze(0).expand(x.size(0), -1, -1), x)
 
-        # Skip connection with gating mechanism
-        gate = torch.sigmoid(torch.sum(x * x_transformed, dim=-1, keepdim=True) / np.sqrt(x.size(-1)))
-        x_out = x * (1 - gate) + x_transformed * gate
+        # Skip connection
+        x_out = x + x_transformed
 
         return x_out
 
@@ -321,8 +348,7 @@ def create_spatial_relationship_graph(
         scales: List[int] = [5, 15, 25],
         scale_weights: List[float] = [0.2, 0.3, 0.5],
         positional_adjustment: float = 0.2,
-        spatial_statistics: Optional[Dict[str, torch.Tensor]] = None,
-        smoothing_factor: float = 0.01
+        spatial_statistics: Optional[Dict[str, torch.Tensor]] = None
 ) -> SpatialRelationshipGraph:
     """
     Create a Spatial Relationship Graph module.
@@ -333,7 +359,6 @@ def create_spatial_relationship_graph(
         scale_weights: Weights for each scale.
         positional_adjustment: Factor for adjusting positional relationships.
         spatial_statistics: Pre-computed spatial statistics.
-        smoothing_factor: Small value to avoid division by zero.
 
     Returns:
         SpatialRelationshipGraph module.
@@ -343,7 +368,6 @@ def create_spatial_relationship_graph(
         scales=scales,
         scale_weights=scale_weights,
         positional_adjustment=positional_adjustment,
-        spatial_statistics=spatial_statistics,
-        smoothing_factor=smoothing_factor
+        spatial_statistics=spatial_statistics
     )
 

@@ -27,8 +27,7 @@ class CoOccurrenceGraph(nn.Module):
             co_occurrence_matrix: Optional[torch.Tensor] = None,
             context_types: int = 4,
             context_similarity_threshold: float = 0.5,
-            scaling_factor: float = 5.0,
-            smoothing_factor: float = 0.01
+            scaling_factor: float = 10.0
     ):
         """
         Initialize Co-occurrence Graph.
@@ -39,14 +38,12 @@ class CoOccurrenceGraph(nn.Module):
             context_types: Number of context types for grouping.
             context_similarity_threshold: Threshold for context similarity.
             scaling_factor: Scaling factor for confidence calculation.
-            smoothing_factor: Add to denominators to prevent div by zero.
         """
         super().__init__()
         self.num_classes = num_classes
         self.context_types = context_types
         self.context_similarity_threshold = context_similarity_threshold
         self.scaling_factor = scaling_factor
-        self.smoothing_factor = smoothing_factor
 
         # Initialize adjacency matrix
         if co_occurrence_matrix is not None:
@@ -59,7 +56,7 @@ class CoOccurrenceGraph(nn.Module):
         nn.init.xavier_uniform_(self.context_embeddings)
 
         # Class counts (will be set during update)
-        self.register_buffer("class_counts", torch.ones(num_classes) * self.smoothing_factor)
+        self.register_buffer("class_counts", torch.ones(num_classes))
 
         # Flag to track whether the graph has been built
         self.graph_built = False
@@ -71,22 +68,20 @@ class CoOccurrenceGraph(nn.Module):
         """
         Build the co-occurrence graph from statistics.
         """
-        if not self.graph_built or torch.any(self.co_occurrence > 0):
+        if not self.graph_built and torch.any(self.co_occurrence > 0):
             # Compute class balance statistics
             total_samples = torch.sum(self.class_counts)
             max_count = torch.max(self.class_counts)
             avg_count = torch.mean(self.class_counts)
 
-            # Normalize co-occurrence with Laplace smoothing
+            # Normalize co-occurrence
             normalized_co_occurrence = torch.zeros_like(self.co_occurrence)
             for i in range(self.num_classes):
                 for j in range(self.num_classes):
-                    if i != j:
-                        # Normalized co-occurrence with smoothing
-                        normalized_co_occurrence[i, j] = (self.co_occurrence[i, j] + self.smoothing_factor) / (
-                            torch.sqrt((self.class_counts[i] + self.smoothing_factor) *
-                                       (self.class_counts[j] + self.smoothing_factor))
-                        )
+                    if i != j and self.class_counts[i] > 0 and self.class_counts[j] > 0:
+                        # Normalized co-occurrence
+                        normalized_co_occurrence[i, j] = self.co_occurrence[i, j] / torch.sqrt(
+                            self.class_counts[i] * self.class_counts[j])
 
             # Compute context affinity
             context_affinity = torch.zeros_like(self.co_occurrence)
@@ -97,8 +92,8 @@ class CoOccurrenceGraph(nn.Module):
             # Compute context similarity
             context_sim = torch.mm(norm_embeddings, norm_embeddings.t())
 
-            # Apply threshold with smooth transition
-            context_aff_mask = torch.sigmoid((context_sim - self.context_similarity_threshold) * 10)
+            # Apply threshold
+            context_aff_mask = (context_sim > self.context_similarity_threshold).float()
 
             # Compute context affinity
             for i in range(self.num_classes):
@@ -107,7 +102,7 @@ class CoOccurrenceGraph(nn.Module):
                         # Context affinity based on similarity in embedding space
                         context_affinity[i, j] = (context_sim[i, j] * context_aff_mask[i, j]).item()
 
-            # Class balance correction with improved weighting for rare classes
+            # Class balance correction
             class_balance_correction = torch.zeros_like(self.co_occurrence)
             for i in range(self.num_classes):
                 for j in range(self.num_classes):
@@ -117,34 +112,28 @@ class CoOccurrenceGraph(nn.Module):
                         min_count = min(self.class_counts[i], self.class_counts[j])
                         max_count = max(self.class_counts[i], self.class_counts[j])
 
-                        # Using logarithmic scaling to better handle class imbalance
-                        if min_count > self.smoothing_factor and max_count > self.smoothing_factor:
-                            balance_factor = torch.log1p(max_count / avg_count) * (min_count / max_count)
-                            class_balance_correction[i, j] = balance_factor
-                        else:
-                            class_balance_correction[i, j] = self.smoothing_factor
+                        balance_factor = (max_count / avg_count) * (min_count / max_count)
+                        class_balance_correction[i, j] = balance_factor
 
-            # Apply confidence weighting with sigmoid shaping for better scaling
+            # Apply confidence weighting
             confidence = torch.zeros_like(self.co_occurrence)
             for i in range(self.num_classes):
                 for j in range(self.num_classes):
                     if i != j:
                         # Confidence based on number of co-occurrences
                         # More co-occurrences -> higher confidence
-                        # Using sigmoid to create a smoother confidence curve
-                        confidence[i, j] = 2.0 / (
-                                    1.0 + torch.exp(-self.co_occurrence[i, j] / self.scaling_factor)) - 1.0
+                        confidence[i, j] = 1.0 - torch.exp(-self.co_occurrence[i, j] / self.scaling_factor)
 
-            # Compute final edge weights with careful normalization
+            # Compute final edge weights
             self.edge_weights = normalized_co_occurrence * context_affinity * class_balance_correction * confidence
 
-            # Apply row-wise softmax to create proper probability distributions
-            self.edge_weights = F.softmax(self.edge_weights * 5.0,
-                                          dim=1)  # Temperature scaling for sharper distribution
+            # Make symmetric
+            self.edge_weights = 0.5 * (self.edge_weights + self.edge_weights.t())
 
-            # Add self-loops with small weight
-            eye = torch.eye(self.num_classes, device=self.edge_weights.device)
-            self.edge_weights = self.edge_weights * (1 - 0.1) + eye * 0.1
+            # Normalize
+            max_weight = torch.max(self.edge_weights)
+            if max_weight > 0:
+                self.edge_weights = self.edge_weights / max_weight
 
             self.graph_built = True
 
@@ -164,14 +153,6 @@ class CoOccurrenceGraph(nn.Module):
         # Update co-occurrence matrix
         for i in range(batch_size):
             label_indices = torch.nonzero(labels[i]).squeeze(-1)
-
-            # Skip samples with no labels
-            if label_indices.numel() == 0:
-                continue
-
-            # Handle single label case
-            if label_indices.numel() == 1:
-                continue
 
             # Update co-occurrence for each pair of labels
             for idx1 in label_indices:
@@ -212,9 +193,8 @@ class CoOccurrenceGraph(nn.Module):
         # edge_weights: [num_classes, num_classes]
         x_transformed = torch.bmm(self.edge_weights.unsqueeze(0).expand(x.size(0), -1, -1), x)
 
-        # Skip connection with gating mechanism
-        gate = torch.sigmoid(torch.sum(x * x_transformed, dim=-1, keepdim=True) / np.sqrt(x.size(-1)))
-        x_out = x * (1 - gate) + x_transformed * gate
+        # Skip connection
+        x_out = x + x_transformed
 
         return x_out
 
@@ -224,8 +204,7 @@ def create_co_occurrence_graph(
         co_occurrence_matrix: Optional[torch.Tensor] = None,
         context_types: int = 4,
         context_similarity_threshold: float = 0.5,
-        scaling_factor: float = 5.0,
-        smoothing_factor: float = 0.01
+        scaling_factor: float = 10.0
 ) -> CoOccurrenceGraph:
     """
     Create a Co-occurrence Graph module.
@@ -236,7 +215,6 @@ def create_co_occurrence_graph(
         context_types: Number of context types for grouping.
         context_similarity_threshold: Threshold for context similarity.
         scaling_factor: Scaling factor for confidence calculation.
-        smoothing_factor: Add to denominators to prevent div by zero.
 
     Returns:
         CoOccurrenceGraph module.
@@ -246,7 +224,6 @@ def create_co_occurrence_graph(
         co_occurrence_matrix=co_occurrence_matrix,
         context_types=context_types,
         context_similarity_threshold=context_similarity_threshold,
-        scaling_factor=scaling_factor,
-        smoothing_factor=smoothing_factor
+        scaling_factor=scaling_factor
     )
 

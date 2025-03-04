@@ -27,9 +27,8 @@ class VisualFeatureGraph(nn.Module):
             num_classes: int,
             feature_dim: int,
             similarity_balance: float = 0.7,
-            tier1_threshold: int = 30,
-            tier2_threshold: int = 8,
-            smoothing_factor: float = 0.01
+            tier1_threshold: int = 50,
+            tier2_threshold: int = 10
     ):
         """
         Initialize Visual Feature Graph.
@@ -40,7 +39,6 @@ class VisualFeatureGraph(nn.Module):
             similarity_balance: Balance factor between visual and contextual similarity.
             tier1_threshold: Threshold for Tier 1 relationships (frequent co-occurrences).
             tier2_threshold: Threshold for Tier 2 relationships (moderate co-occurrences).
-            smoothing_factor: Small value to avoid division by zero.
         """
         super().__init__()
         self.num_classes = num_classes
@@ -48,7 +46,6 @@ class VisualFeatureGraph(nn.Module):
         self.similarity_balance = similarity_balance
         self.tier1_threshold = tier1_threshold
         self.tier2_threshold = tier2_threshold
-        self.smoothing_factor = smoothing_factor
 
         # Initialize class-specific feature embeddings
         self.class_features = nn.Parameter(torch.randn(num_classes, feature_dim))
@@ -65,22 +62,14 @@ class VisualFeatureGraph(nn.Module):
         self.register_buffer("edge_weights", torch.zeros(num_classes, num_classes))
 
         # Instance count buffer
-        self.register_buffer("instance_counts", torch.zeros(num_classes) + self.smoothing_factor)
+        self.register_buffer("instance_counts", torch.zeros(num_classes))
 
         # Learnable feature similarity projection
         self.sim_proj = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
-            nn.LayerNorm(feature_dim // 2),
             nn.ReLU(),
             nn.Linear(feature_dim // 2, 1),
             nn.Sigmoid()
-        )
-
-        # Feature projection layers for better disentanglement
-        self.feature_proj = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim),
-            nn.LayerNorm(feature_dim),
-            nn.ReLU()
         )
 
         # Whether the graph has been built
@@ -96,21 +85,10 @@ class VisualFeatureGraph(nn.Module):
         """
         batch_size = features.shape[0]
 
-        # Project features
-        features = self.feature_proj(features)
-
         # For each sample, update features for positive classes
         for i in range(batch_size):
             # Get positive classes
             pos_indices = torch.nonzero(labels[i]).squeeze(-1)
-
-            # Skip if no positive classes
-            if pos_indices.numel() == 0:
-                continue
-
-            # Handle single index case
-            if pos_indices.dim() == 0:
-                pos_indices = pos_indices.unsqueeze(0)
 
             # Update co-occurrence for each pair of labels
             for idx1 in pos_indices:
@@ -118,8 +96,11 @@ class VisualFeatureGraph(nn.Module):
                 self.instance_counts[idx1] += 1
 
                 # Update class feature with moving average
-                alpha = 1.0 / self.instance_counts[idx1]
-                self.class_features.data[idx1] = (1 - alpha) * self.class_features.data[idx1] + alpha * features[i]
+                if self.instance_counts[idx1] > 1:
+                    alpha = 1.0 / self.instance_counts[idx1]
+                    self.class_features.data[idx1] = (1 - alpha) * self.class_features.data[idx1] + alpha * features[i]
+                else:
+                    self.class_features.data[idx1] = features[i]
 
                 # Update co-occurrence
                 for idx2 in pos_indices:
@@ -159,7 +140,7 @@ class VisualFeatureGraph(nn.Module):
 
                         if co_occur_count > self.tier1_threshold:
                             # Tier 1: Frequent co-occurrences
-                            # Feature similarity is more important
+                            # Directly use visual similarity with area weighting
 
                             # Compute feature difference (complementary features)
                             feat_diff = self.class_features[i] - self.class_features[j]
@@ -167,7 +148,7 @@ class VisualFeatureGraph(nn.Module):
                             # Project difference to similarity score
                             sim_weight = self.sim_proj(feat_diff)
 
-                            # Combine visual and context similarity with balance factor
+                            # Combine visual and context similarity
                             combined_sim = self.similarity_balance * visual_sim[i, j] + \
                                            (1 - self.similarity_balance) * context_sim[i, j]
 
@@ -213,7 +194,7 @@ class VisualFeatureGraph(nn.Module):
 
                         else:
                             # Tier 3: Rare or no co-occurrences
-                            # Use a combination of visual similarity and transitive relationships
+                            # Infer relationships from network structure
 
                             # Find neighbors of i and j with strong connections
                             i_neighbors = []
@@ -230,9 +211,9 @@ class VisualFeatureGraph(nn.Module):
                             i_neighbors.sort(key=lambda x: x[1], reverse=True)
                             j_neighbors.sort(key=lambda x: x[1], reverse=True)
 
-                            # Take top neighbors (limit to 3 for efficiency)
-                            i_top = i_neighbors[:3]
-                            j_top = j_neighbors[:3]
+                            # Take top neighbors (limit to 5 for efficiency)
+                            i_top = i_neighbors[:5]
+                            j_top = j_neighbors[:5]
 
                             # Compute transitive similarity
                             trans_sim = 0.0
@@ -244,7 +225,7 @@ class VisualFeatureGraph(nn.Module):
                                     if self.co_occurrence[i_neigh, j_neigh] > 0:
                                         # Transitive connection exists
                                         # Weight by connection strengths
-                                        weight = (i_co * j_co) / (self.tier1_threshold + self.smoothing_factor)
+                                        weight = (i_co * j_co) / self.tier1_threshold
                                         sim = (visual_sim[i, i_neigh] * visual_sim[j, j_neigh] *
                                                visual_sim[i_neigh, j_neigh])
 
@@ -254,15 +235,13 @@ class VisualFeatureGraph(nn.Module):
                             if total_weight > 0:
                                 edge_weights[i, j] = trans_sim / total_weight
                             else:
-                                # Fallback to direct visual similarity with low confidence
-                                edge_weights[i, j] = 0.2 * visual_sim[i, j]
+                                # Fallback to context similarity with low confidence
+                                edge_weights[i, j] = 0.1 * context_sim[i, j]
 
-            # Apply row-wise softmax for proper probability distribution
-            edge_weights = F.softmax(edge_weights * 5.0, dim=1)  # Temperature scaling for sharper distribution
-
-            # Add self-loops with small weight
-            eye = torch.eye(self.num_classes, device=edge_weights.device)
-            edge_weights = edge_weights * (1 - 0.1) + eye * 0.1
+            # Normalize edge weights
+            max_weight = torch.max(edge_weights)
+            if max_weight > 0:
+                edge_weights = edge_weights / max_weight
 
             self.edge_weights = edge_weights
             self.graph_built = True
@@ -278,6 +257,7 @@ class VisualFeatureGraph(nn.Module):
             self.build_graph()
 
         return self.edge_weights
+
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -297,20 +277,17 @@ class VisualFeatureGraph(nn.Module):
         # edge_weights: [num_classes, num_classes]
         x_transformed = torch.bmm(self.edge_weights.unsqueeze(0).expand(x.size(0), -1, -1), x)
 
-        # Skip connection with gating mechanism
-        gate = torch.sigmoid(torch.sum(x * x_transformed, dim=-1, keepdim=True) / np.sqrt(x.size(-1)))
-        x_out = x * (1 - gate) + x_transformed * gate
+        # Skip connection
+        x_out = x + x_transformed
 
         return x_out
-
 
 def create_visual_feature_graph(
         num_classes: int,
         feature_dim: int,
         similarity_balance: float = 0.7,
-        tier1_threshold: int = 30,
-        tier2_threshold: int = 8,
-        smoothing_factor: float = 0.01
+        tier1_threshold: int = 50,
+        tier2_threshold: int = 10
 ) -> VisualFeatureGraph:
     """
     Create a Visual Feature Graph module.
@@ -321,7 +298,6 @@ def create_visual_feature_graph(
         similarity_balance: Balance factor between visual and contextual similarity.
         tier1_threshold: Threshold for Tier 1 relationships (frequent co-occurrences).
         tier2_threshold: Threshold for Tier 2 relationships (moderate co-occurrences).
-        smoothing_factor: Small value to avoid division by zero.
 
     Returns:
         VisualFeatureGraph module.
@@ -331,7 +307,8 @@ def create_visual_feature_graph(
         feature_dim=feature_dim,
         similarity_balance=similarity_balance,
         tier1_threshold=tier1_threshold,
-        tier2_threshold=tier2_threshold,
-        smoothing_factor=smoothing_factor
+        tier2_threshold=tier2_threshold
     )
 
+
+    
