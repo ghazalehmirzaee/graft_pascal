@@ -225,38 +225,4 @@ plot_adjacency_matrix(adj_matrix, class_names, title="Co-occurrence Graph")
 [//]: # (})
 
 [//]: # (```)
-
-## License
-
-[//]: # (This project is licensed under the MIT License - see the LICENSE file for details.)
-
-## Acknowledgments
-
-[//]: # ()
-[//]: # (- The PASCAL VOC dataset team for providing the benchmark dataset)
-
-[//]: # (- The authors of the Vision Transformer and Masked Autoencoder for their foundational work)
-[//]: # ()
-[//]: # (# graft_pascal)
-
-[//]: # (# graft_pascal)
-
-[//]: # (# graft_pascal)
-
-[//]: # (# graft_pascal)
-
-[//]: # (# graft_pascal)
-
-[//]: # (# graft_pascal)
-
-[//]: # (# graft_pascal)
-
-[//]: # (# graft_pascal)
-
-[//]: # (# graft_pascal)
-
-[//]: # (# graft_pascal)
-
-[//]: # (# graft_pascal)
-# graft_pascal
 # pascal_multistage
