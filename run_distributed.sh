@@ -16,7 +16,7 @@ module load anaconda3
 source activate myenv
 
 # project directory
-cd /path/to/graft-pascal
+cd /path/to/graft_pascal
 
 # Run training script with torch.distributed.launch
 python -m torch.distributed.launch \

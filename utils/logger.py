@@ -62,7 +62,7 @@ class GRAFTLogger:
         self.log_frequency = log_frequency
         self.run_name = run_name
 
-        # Initialize current_phase BEFORE using it in init_wandb
+        # Initialize current_phase
         self.current_phase = None
 
         # Create output directory if it doesn't exist
@@ -80,7 +80,7 @@ class GRAFTLogger:
         # Set up logging
         self.setup_logging()
 
-        # Initialize W&B (now current_phase is already defined)
+        # Initialize W&B
         if self.use_wandb:
             self.init_wandb()
 
@@ -96,9 +96,6 @@ class GRAFTLogger:
         # Log initialization
         self.logger.info(f"Initialized logger for project: {project_name}")
         self.logger.info(f"Output directory: {output_dir}")
-
-        # Current phase
-        self.current_phase = None
 
     def setup_logging(self):
         """
@@ -154,7 +151,7 @@ class GRAFTLogger:
 
                 # Get learning rate
                 if ("training" in self.config and "optimizer" in self.config["training"] and
-                    "lr" in self.config["training"]["optimizer"]):
+                        "lr" in self.config["training"]["optimizer"]):
                     lr = self.config["training"]["optimizer"]["lr"]
                     lr_str = f"_lr{lr}" if lr else ""
 
@@ -255,7 +252,7 @@ class GRAFTLogger:
 
         # Log to W&B
         if self.use_wandb:
-            wandb.config.update(hyperparams, allow_val_change=True)  # Added allow_val_change=True
+            wandb.config.update(hyperparams, allow_val_change=True)
 
     def log_model_summary(self, model_summary: str):
         """
@@ -380,7 +377,6 @@ class GRAFTLogger:
                     # Close figure
                     plt.close(fig)
 
-
     def plot_training_curves(self, save_path: Optional[str] = None):
         """
         Plot training curves.
@@ -425,8 +421,7 @@ class GRAFTLogger:
         if self.best_epoch >= 0:
             best_idx = val_epochs.index(self.best_epoch) if self.best_epoch in val_epochs else -1
             if best_idx >= 0:
-                axes[1].plot(self.best_epoch, val_map[best_idx], "ro", markersize=10,
-                             label=f"Best (Epoch {self.best_epoch})")
+                axes[1].plot(self.best_epoch, val_map[best_idx], "ro", markersize=10, label=f"Best (Epoch {self.best_epoch})")
                 axes[1].legend()
 
         # Set title
@@ -507,6 +502,7 @@ class GRAFTLogger:
 
         return checkpoint
 
+
 def create_logger(
         config: Dict[str, Any],
         output_dir: Optional[str] = None,
@@ -526,7 +522,7 @@ def create_logger(
     # Get logger parameters from config
     project_name = config.get("project_name", "GRAFT-PASCAL")
     use_wandb = config.get("wandb", {}).get("enabled", True)
-    wandb_entity = config.get("wandb", {}).get("entity", "mirzaeeghazal")
+    wandb_entity = config.get("wandb", {}).get("entity", None)
 
     # Use provided output directory if any
     if output_dir is None:
@@ -540,7 +536,8 @@ def create_logger(
         wandb_entity=wandb_entity,
         config=config,
         log_frequency=10,
-        run_name=experiment_name  # Pass the custom name
+        run_name=experiment_name
     )
 
     return logger
+

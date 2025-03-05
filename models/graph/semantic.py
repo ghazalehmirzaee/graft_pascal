@@ -1,11 +1,4 @@
-"""
-Semantic relationship graph module for GRAFT framework.
-
-This module implements the semantic relationship graph component
-that captures label relationships based on their taxonomic,
-functional, and scene-type similarities.
-"""
-from typing import Dict, List, Optional, Tuple, Union, Any
+# models/graph/semantic.py
 
 import torch
 import torch.nn as nn
@@ -18,15 +11,14 @@ class SemanticRelationshipGraph(nn.Module):
     Semantic Relationship Graph module.
 
     This graph captures the semantic relationships between labels
-    based on their taxonomic hierarchy, functional similarity,
-    and scene-type co-occurrence patterns.
+    based on their taxonomic, functional, and scene-type similarities.
     """
 
     def __init__(
             self,
             num_classes: int,
-            class_names: List[str],
-            dimension_weights: List[float] = [0.3, 0.4, 0.3],
+            class_names: list,
+            dimension_weights: list = [0.3, 0.4, 0.3],
             adaptation_factor: float = 0.7
     ):
         """
@@ -45,7 +37,7 @@ class SemanticRelationshipGraph(nn.Module):
         self.adaptation_factor = adaptation_factor
 
         assert len(dimension_weights) == 3, "Must provide weights for all 3 semantic dimensions"
-        assert sum(dimension_weights) == 1.0, "Dimension weights must sum to 1.0"
+        assert abs(sum(dimension_weights) - 1.0) < 1e-6, "Dimension weights must sum to 1.0"
 
         # Initialize semantic relationship matrices
         self.register_buffer("taxonomic_sim", self._compute_taxonomic_similarity())
@@ -245,13 +237,13 @@ class SemanticRelationshipGraph(nn.Module):
 
             # Normalize by row sum to get conditional probabilities
             mask = row_sum > 0
-            observed_sim[mask.repeat(1, self.num_classes)] = (
-                    self.observed_co_occurrence[mask.repeat(1, self.num_classes)] /
-                    row_sum.repeat(1, self.num_classes)[mask.repeat(1, self.num_classes)]
-            )
+            norm_observed = self.observed_co_occurrence.clone()
+            for i in range(self.num_classes):
+                if row_sum[i] > 0:
+                    norm_observed[i] = self.observed_co_occurrence[i] / row_sum[i]
 
             # Symmetrize
-            observed_sim = 0.5 * (observed_sim + observed_sim.t())
+            observed_sim = 0.5 * (norm_observed + norm_observed.t())
 
         # Combine semantic and observed similarities
         if torch.sum(self.observed_co_occurrence) > 0:
@@ -310,8 +302,8 @@ class SemanticRelationshipGraph(nn.Module):
 
 def create_semantic_relationship_graph(
         num_classes: int,
-        class_names: List[str],
-        dimension_weights: List[float] = [0.3, 0.4, 0.3],
+        class_names: list,
+        dimension_weights: list = [0.3, 0.4, 0.3],
         adaptation_factor: float = 0.7
 ) -> SemanticRelationshipGraph:
     """
@@ -332,4 +324,3 @@ def create_semantic_relationship_graph(
         dimension_weights=dimension_weights,
         adaptation_factor=adaptation_factor
     )
-

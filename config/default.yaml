@@ -11,7 +11,7 @@ wandb:
 # Dataset settings
 dataset:
   name: "pascal_voc"
-  root: "/path/to/pascal"  # Update this with your actual path
+  root: "/users/gm00051/Pascal/VOCdevkit"
   img_size: 224
   num_classes: 20
 

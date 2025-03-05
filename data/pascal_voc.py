@@ -11,8 +11,6 @@ from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 
-from models.graph import co_occurrence
-
 # PASCAL VOC class names (20 classes)
 VOC_CLASSES = [
     'aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat',
@@ -234,28 +232,6 @@ class PascalVOCDataset(Dataset):
 
         return co_occurrence
 
-    def get_context_types(self) -> Dict[str, List[str]]:
-        """
-        Get context type categorization for PASCAL VOC classes.
-
-        Returns:
-            Dictionary mapping context types to class lists.
-        """
-        # Categorize classes by scene context
-        context_types = {
-            "indoor_home": ["bottle", "chair", "diningtable", "pottedplant", "sofa", "tvmonitor"],
-            "indoor_office": ["chair", "pottedplant", "tvmonitor"],
-            "outdoor_urban": ["bicycle", "bus", "car", "motorbike", "person", "train"],
-            "outdoor_natural": ["aeroplane", "bird", "boat", "cow", "dog", "cat", "horse", "sheep"]
-        }
-
-        # Convert class names to indices
-        context_indices = {}
-        for context, classes in context_types.items():
-            context_indices[context] = [VOC_CLASSES.index(cls) for cls in classes if cls in VOC_CLASSES]
-
-        return context_indices
-
     def get_spatial_statistics(self) -> Dict[str, torch.Tensor]:
         """
         Calculate spatial statistics for all classes.
@@ -392,7 +368,7 @@ def create_pascal_voc_dataloaders(
     """
     # Define transformations
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(img_size),
+        transforms.Resize((img_size, img_size)),
         transforms.RandomHorizontalFlip(),
         transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
         transforms.ToTensor(),

@@ -316,123 +316,6 @@ def plot_precision_recall_curves(
     return fig
 
 
-def plot_attention_weights(
-        attention_weights: Union[np.ndarray, torch.Tensor],
-        class_names: List[str],
-        title: str = "Attention Weights",
-        cmap: str = "viridis",
-        figsize: Tuple[int, int] = (10, 8),
-        save_path: Optional[str] = None
-) -> plt.Figure:
-    """
-    Plot attention weights as a heatmap.
-
-    Args:
-        attention_weights: Attention weights of shape [num_classes, num_classes].
-        class_names: List of class names.
-        title: Plot title.
-        cmap: Colormap for heatmap.
-        figsize: Figure size.
-        save_path: Path to save the figure.
-
-    Returns:
-        Matplotlib figure.
-    """
-    # Convert to numpy if tensor
-    if isinstance(attention_weights, torch.Tensor):
-        attention_weights = attention_weights.detach().cpu().numpy()
-
-    # Create figure
-    fig, ax = plt.subplots(figsize=figsize)
-
-    # Plot heatmap
-    sns.heatmap(
-        attention_weights,
-        annot=True,
-        fmt=".2f",
-        cmap=cmap,
-        xticklabels=class_names,
-        yticklabels=class_names,
-        ax=ax
-    )
-
-    # Set title and labels
-    ax.set_title(title)
-    ax.set_xlabel("Class")
-    ax.set_ylabel("Class")
-
-    # Rotate x-axis labels for better readability
-    plt.xticks(rotation=45, ha="right")
-
-    # Tight layout
-    plt.tight_layout()
-
-    # Save figure if save_path is provided
-    if save_path is not None:
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-
-    return fig
-
-
-def plot_graph_contribution(
-        graph_weights: Union[np.ndarray, torch.Tensor],
-        graph_names: List[str],
-        title: str = "Graph Contribution",
-        figsize: Tuple[int, int] = (8, 6),
-        save_path: Optional[str] = None
-) -> plt.Figure:
-    """
-    Plot contribution of each graph component.
-
-    Args:
-        graph_weights: Weights of each graph component.
-        graph_names: Names of graph components.
-        title: Plot title.
-        figsize: Figure size.
-        save_path: Path to save the figure.
-
-    Returns:
-        Matplotlib figure.
-    """
-    # Convert to numpy if tensor
-    if isinstance(graph_weights, torch.Tensor):
-        graph_weights = graph_weights.detach().cpu().numpy()
-
-    # Create figure
-    fig, ax = plt.subplots(figsize=figsize)
-
-    # Plot bar chart
-    bars = ax.bar(graph_names, graph_weights)
-
-    # Add value labels
-    for bar in bars:
-        height = bar.get_height()
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            height + 0.01,
-            f"{height:.2f}",
-            ha="center",
-            va="bottom"
-        )
-
-    # Set title and labels
-    ax.set_title(title)
-    ax.set_xlabel("Graph Component")
-    ax.set_ylabel("Weight")
-
-    # Set y-axis limits
-    ax.set_ylim([0, max(graph_weights) * 1.2])
-
-    # Tight layout
-    plt.tight_layout()
-
-    # Save figure if save_path is provided
-    if save_path is not None:
-        plt.savefig(save_path, dpi=300, bbox_inches="tight")
-
-    return fig
-
-
 def plot_predictions(
         images: torch.Tensor,
         true_labels: torch.Tensor,
@@ -502,6 +385,65 @@ def plot_predictions(
 
             # Remove axis
             ax.axis("off")
+
+    # Tight layout
+    plt.tight_layout()
+
+    # Save figure if save_path is provided
+    if save_path is not None:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+
+    return fig
+
+
+def plot_graph_contribution(
+        graph_weights: Union[np.ndarray, torch.Tensor],
+        graph_names: List[str],
+        title: str = "Graph Component Contribution",
+        figsize: Tuple[int, int] = (8, 6),
+        save_path: Optional[str] = None
+) -> plt.Figure:
+    """
+    Plot contribution of each graph component.
+
+    Args:
+        graph_weights: Weights of each graph component.
+        graph_names: Names of graph components.
+        title: Plot title.
+        figsize: Figure size.
+        save_path: Path to save the figure.
+
+    Returns:
+        Matplotlib figure.
+    """
+    # Convert to numpy if tensor
+    if isinstance(graph_weights, torch.Tensor):
+        graph_weights = graph_weights.detach().cpu().numpy()
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Plot bar chart
+    bars = ax.bar(graph_names, graph_weights)
+
+    # Add value labels
+    for bar in bars:
+        height = bar.get_height()
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            height + 0.01,
+            f"{height:.2f}",
+            ha="center",
+            va="bottom"
+        )
+
+    # Set title and labels
+    ax.set_title(title)
+    ax.set_xlabel("Graph Component")
+    ax.set_ylabel("Weight")
+
+    # Set y-axis limits
+    ax.set_ylim([0, max(graph_weights) * 1.2])
 
     # Tight layout
     plt.tight_layout()

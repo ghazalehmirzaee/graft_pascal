@@ -33,15 +33,9 @@ model:
       tier1_threshold: 50
       tier2_threshold: 10
 
-    # Semantic relationship graph
-    semantic:
-      enabled: true
-      dimension_weights: [0.3, 0.4, 0.3]
-      adaptation_factor: 0.7
-
     # Graph fusion
     fusion:
-      initial_uncertainties: [1.0, 1.0, 1.0, 1.0]
+      initial_uncertainties: [1.0, 1.0, 1.0]
 
 # Training configuration
 training:

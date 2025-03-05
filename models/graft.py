@@ -14,7 +14,6 @@ from models.vit import create_vit_model
 from models.graph.co_occurrence import create_co_occurrence_graph
 from models.graph.spatial import create_spatial_relationship_graph
 from models.graph.visual import create_visual_feature_graph
-from models.graph.semantic import create_semantic_relationship_graph
 from models.graph.fusion import create_graph_fusion_network
 import numpy as np
 
@@ -40,7 +39,6 @@ class GRAFT(nn.Module):
             co_occurrence_enabled: bool = True,
             spatial_enabled: bool = True,
             visual_enabled: bool = True,
-            semantic_enabled: bool = True,
             context_types: int = 4,
             context_similarity_threshold: float = 0.5,
             scales: List[int] = [5, 15, 25],
@@ -49,8 +47,6 @@ class GRAFT(nn.Module):
             similarity_balance: float = 0.7,
             tier1_threshold: int = 50,
             tier2_threshold: int = 10,
-            dimension_weights: List[float] = [0.3, 0.4, 0.3],
-            adaptation_factor: float = 0.7,
             initial_uncertainties: Optional[List[float]] = None
     ):
         """
@@ -68,7 +64,6 @@ class GRAFT(nn.Module):
             co_occurrence_enabled: Whether to enable co-occurrence graph.
             spatial_enabled: Whether to enable spatial relationship graph.
             visual_enabled: Whether to enable visual feature graph.
-            semantic_enabled: Whether to enable semantic relationship graph.
             context_types: Number of context types for co-occurrence graph.
             context_similarity_threshold: Threshold for context similarity.
             scales: List of grid scales for spatial relationship graph.
@@ -77,8 +72,6 @@ class GRAFT(nn.Module):
             similarity_balance: Balance factor between visual and contextual similarity.
             tier1_threshold: Threshold for Tier 1 relationships.
             tier2_threshold: Threshold for Tier 2 relationships.
-            dimension_weights: Weights for taxonomic, functional, and scene dimensions.
-            adaptation_factor: Factor for adapting semantic relationships.
             initial_uncertainties: Initial uncertainty estimates for each graph.
         """
         super().__init__()
@@ -136,15 +129,6 @@ class GRAFT(nn.Module):
                 )
                 self.enabled_graphs.append("visual")
 
-            if semantic_enabled:
-                self.graph_components["semantic"] = create_semantic_relationship_graph(
-                    num_classes=num_classes,
-                    class_names=class_names,
-                    dimension_weights=dimension_weights,
-                    adaptation_factor=adaptation_factor
-                )
-                self.enabled_graphs.append("semantic")
-
             # Graph fusion network
             if len(self.enabled_graphs) > 0:
                 self.fusion_network = create_graph_fusion_network(
@@ -175,21 +159,11 @@ class GRAFT(nn.Module):
         batch_size = x.shape[0]
 
         # Extract visual features from backbone
-        backbone_output = self.backbone.forward_features(x)
-
-        # Handle output that could be a tuple or tensor
-        if isinstance(backbone_output, tuple):
-            # If it's a tuple, use the first element (typically the class token)
-            backbone_features = backbone_output[0]
-        else:
-            # If it's already a tensor, use it as is
-            backbone_features = backbone_output
+        backbone_features = self.backbone.forward_features(x)  # [batch_size, feature_dim]
 
         # Initial node features (replicated for each class)
         node_features = self.node_init(backbone_features)  # [batch_size, feature_dim]
-        node_features = node_features.unsqueeze(1).expand(-1, self.num_classes,
-                                                          -1)
-        
+        node_features = node_features.unsqueeze(1).expand(-1, self.num_classes, -1)  # [batch_size, num_classes, feature_dim]
 
         # Apply graph components
         if self.graphs_enabled and len(self.enabled_graphs) > 0:
@@ -262,13 +236,6 @@ class GRAFT(nn.Module):
             if features is not None and labels is not None:
                 self.graph_components["visual"].update_features(features, labels)
 
-        # Update semantic relationship graph
-        if "semantic" in self.graph_components and "labels" in batch_data:
-            labels = batch_data["labels"]
-
-            if labels is not None:
-                self.graph_components["semantic"].update_co_occurrence(labels)
-
 
 def create_graft_model(
         num_classes: int,
@@ -299,7 +266,6 @@ def create_graft_model(
     co_occurrence_enabled = graphs_config.get("co_occurrence", {}).get("enabled", True)
     spatial_enabled = graphs_config.get("spatial", {}).get("enabled", True)
     visual_enabled = graphs_config.get("visual", {}).get("enabled", True)
-    semantic_enabled = graphs_config.get("semantic", {}).get("enabled", True)
 
     # Co-occurrence graph parameters
     context_types = graphs_config.get("co_occurrence", {}).get("context_types", 4)
@@ -315,12 +281,8 @@ def create_graft_model(
     tier1_threshold = graphs_config.get("visual", {}).get("tier1_threshold", 50)
     tier2_threshold = graphs_config.get("visual", {}).get("tier2_threshold", 10)
 
-    # Semantic graph parameters
-    dimension_weights = graphs_config.get("semantic", {}).get("dimension_weights", [0.3, 0.4, 0.3])
-    adaptation_factor = graphs_config.get("semantic", {}).get("adaptation_factor", 0.7)
-
     # Fusion parameters
-    initial_uncertainties = graphs_config.get("fusion", {}).get("initial_uncertainties", [1.0, 1.0, 1.0, 1.0])
+    initial_uncertainties = graphs_config.get("fusion", {}).get("initial_uncertainties", [1.0, 1.0, 1.0])
 
     # Create GRAFT model
     model = GRAFT(
@@ -335,7 +297,6 @@ def create_graft_model(
         co_occurrence_enabled=co_occurrence_enabled,
         spatial_enabled=spatial_enabled,
         visual_enabled=visual_enabled,
-        semantic_enabled=semantic_enabled,
         context_types=context_types,
         context_similarity_threshold=context_similarity_threshold,
         scales=scales,
@@ -344,8 +305,6 @@ def create_graft_model(
         similarity_balance=similarity_balance,
         tier1_threshold=tier1_threshold,
         tier2_threshold=tier2_threshold,
-        dimension_weights=dimension_weights,
-        adaptation_factor=adaptation_factor,
         initial_uncertainties=initial_uncertainties
     )
 

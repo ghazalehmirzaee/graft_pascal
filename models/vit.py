@@ -207,22 +207,11 @@ class VisionTransformer(nn.Module):
             nn.init.ones_(m.weight)
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Extract features from input images.
-
-        Args:
-            x: Input tensor of shape [B, C, H, W].
-
-        Returns:
-            Feature tensor of shape [B, D] where D is the embedding dimension.
-        """
-        B = x.shape[0]
-
         # Extract patch embeddings
         x = self.patch_embed(x)
 
         # Add class token
-        cls_token = self.cls_token.expand(B, -1, -1)
+        cls_token = self.cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls_token, x), dim=1)
 
         # Add positional encoding
@@ -234,7 +223,8 @@ class VisionTransformer(nn.Module):
         x = self.norm(x)
 
         # Return [CLS] token features
-        return x[:, 0]
+        return x[:, 0]  # Should return just a tensor, not a tuple
+
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -623,44 +613,6 @@ def vit_base_patch16_224(
     return model
 
 
-def vit_large_patch16_224(
-        pretrained: bool = False,
-        pretrained_weights: Optional[str] = None,
-        img_size: int = 224,
-        num_classes: int = 20,
-        **kwargs
-) -> VisionTransformer:
-    """
-    Create a ViT-Large/16 model.
-
-    Args:
-        pretrained: Whether to use pre-trained weights.
-        pretrained_weights: Path to pre-trained weights.
-        img_size: Input image size.
-        num_classes: Number of output classes.
-
-    Returns:
-        ViT-Large/16 model.
-    """
-    model = VisionTransformer(
-        img_size=img_size,
-        patch_size=16,
-        embed_dim=1024,
-        depth=24,
-        num_heads=16,
-        mlp_ratio=4,
-        qkv_bias=True,
-        norm_layer=nn.LayerNorm,
-        num_classes=num_classes,
-        **kwargs
-    )
-
-    if pretrained and pretrained_weights is not None:
-        model.load_mae_weights(pretrained_weights, strict=False)
-
-    return model
-
-
 def create_vit_model(
         variant: str = "base",
         patch_size: int = 16,
@@ -688,14 +640,6 @@ def create_vit_model(
 
     if variant == "base":
         return vit_base_patch16_224(
-            pretrained=pretrained,
-            pretrained_weights=pretrained_weights,
-            img_size=img_size,
-            num_classes=num_classes,
-            **kwargs
-        )
-    elif variant == "large":
-        return vit_large_patch16_224(
             pretrained=pretrained,
             pretrained_weights=pretrained_weights,
             img_size=img_size,

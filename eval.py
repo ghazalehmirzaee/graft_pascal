@@ -17,7 +17,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 
-from data.pascal_voc import PascalVOCDataset, create_pascal_voc_dataloaders, get_class_names
+from data.pascal_voc import create_pascal_voc_dataloaders, get_class_names
 from models.graft import create_graft_model
 from utils.metrics import compute_metrics
 from utils.logger import create_logger
@@ -29,6 +29,25 @@ from utils.visualization import (
     plot_predictions,
     plot_graph_contribution
 )
+
+# Set a fixed seed for reproducibility
+SEED = 42
+
+
+def set_seed(seed: int):
+    """
+    Set seed for reproducibility.
+
+    Args:
+        seed: Random seed.
+    """
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -188,11 +207,13 @@ def evaluate(
     for k, v in metrics.items():
         if isinstance(v, np.ndarray):
             serializable_metrics[k] = v.tolist()
+        elif isinstance(v, np.number):
+            serializable_metrics[k] = float(v)
         else:
             serializable_metrics[k] = v
 
     with open(metrics_file, 'w') as f:
-        json.dump(serializable_metrics, f, indent=2)
+        json.dump(serializable_metrics, f, indent=4)
 
     # Print summary metrics
     print("\nEvaluation Results:")
@@ -220,6 +241,9 @@ def main(args):
     Args:
         args: Command-line arguments.
     """
+    # Set fixed seed for reproducibility
+    set_seed(SEED)
+
     # Load config
     config = load_config(args.config)
 

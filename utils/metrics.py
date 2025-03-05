@@ -232,17 +232,17 @@ def compute_metrics(
     # Return dictionary of metrics
     return {
         "mAP": mAP,
-        "AP": ap.tolist(),
+        "AP": ap,
         "precision": precision,
         "recall": recall,
         "f1": f1,
-        "per_class_precision": per_class_precision.tolist(),
-        "per_class_recall": per_class_recall.tolist(),
-        "per_class_f1": per_class_f1.tolist(),
+        "per_class_precision": per_class_precision,
+        "per_class_recall": per_class_recall,
+        "per_class_f1": per_class_f1,
         "hamming_loss": h_loss,
         "subset_accuracy": subset_acc,
-        "sensitivity": sensitivity.tolist(),
-        "specificity": specificity.tolist(),
+        "sensitivity": sensitivity,
+        "specificity": specificity,
         "avg_sensitivity": avg_sensitivity,
         "avg_specificity": avg_specificity
     }

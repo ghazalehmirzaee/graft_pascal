@@ -258,7 +258,6 @@ class VisualFeatureGraph(nn.Module):
 
         return self.edge_weights
 
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass.
@@ -281,6 +280,7 @@ class VisualFeatureGraph(nn.Module):
         x_out = x + x_transformed
 
         return x_out
+
 
 def create_visual_feature_graph(
         num_classes: int,
@@ -310,5 +310,3 @@ def create_visual_feature_graph(
         tier2_threshold=tier2_threshold
     )
 
-
-    

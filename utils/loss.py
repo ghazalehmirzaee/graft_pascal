@@ -242,8 +242,6 @@ class MultiComponentLoss(nn.Module):
         super().__init__()
         self.num_classes = num_classes
         self.class_weights = class_weights
-
-        # Add this line to fix the issue
         self.learn_weights = learn_weights
 
         # Initialize loss components
@@ -285,7 +283,7 @@ class MultiComponentLoss(nn.Module):
         asl = self.asl_loss(input, target)
 
         # Get loss weights
-        if hasattr(self, "learn_weights") and self.learn_weights:
+        if self.learn_weights:
             wbce_weight = torch.exp(self.log_wbce_weight)
             focal_weight = torch.exp(self.log_focal_weight)
             asl_weight = torch.exp(self.log_asl_weight)
@@ -320,8 +318,8 @@ def create_loss_function(
     focal_weight = config.get("focal_weight", 1.0)
     asl_weight = config.get("asl_weight", 1.0)
     focal_gamma = config.get("focal_gamma", 2.0)
-    asl_gamma_neg = config.get("asl_gamma_neg", 4.0)
     asl_beta = config.get("asl_beta", 0.0)
+    asl_gamma_neg = config.get("asl_gamma_neg", 4.0)
 
     return MultiComponentLoss(
         num_classes=num_classes,

@@ -109,7 +109,7 @@ class SpatialRelationshipGraph(nn.Module):
             # Create grid
             x = torch.linspace(0, 1, scale, device=self.positions.device)
             y = torch.linspace(0, 1, scale, device=self.positions.device)
-            grid_y, grid_x = torch.meshgrid(y, x)
+            grid_y, grid_x = torch.meshgrid(y, x, indexing='ij')
 
             # Compute gaussian distribution
             sigma_x = max(0.01, size_x / 4)  # Scale sigma based on object size
